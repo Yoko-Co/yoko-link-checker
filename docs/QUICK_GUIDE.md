@@ -13,7 +13,7 @@ Yoko Link Checker scans your WordPress site for broken links and reports any iss
 ## Where to Find It
 
 In WordPress Admin:
-1. Go to **Tools → Link Checker** in the left sidebar
+1. Go to **Tools → Yoko Link Checker** in the left sidebar
 2. You'll see the **Dashboard** with scan controls and stats
 
 ---
@@ -22,7 +22,7 @@ In WordPress Admin:
 
 ### Starting a Scan
 
-1. Go to **Tools → Link Checker**, **Dashboard** tab
+1. Go to **Tools → Yoko Link Checker**, **Dashboard** tab
 2. Click **Start Scan**
 3. Watch the progress bar — the scan runs in the background
 4. When complete, you'll see a summary of results
@@ -73,7 +73,7 @@ Shows at-a-glance stats:
 
 ## Viewing Detailed Results
 
-1. Go to **Tools → Link Checker**, **Reports** tab
+1. Go to **Tools → Yoko Link Checker**, **Reports** tab
 2. Use the **filter tabs** to view by status:
    - All | Pending | Valid | Redirect | Broken | Warning | Blocked | Timeout | Error | Ignored
    - Each tab shows how many link occurrences it contains; hover for the unique-URL count
@@ -116,7 +116,7 @@ Shows at-a-glance stats:
 
 Need to share results with a client or track in a spreadsheet?
 
-1. Go to **Tools → Link Checker**, **Reports** tab
+1. Go to **Tools → Yoko Link Checker**, **Reports** tab
 2. Filter to the status you want (or leave on "All")
 3. Click **Export CSV (current filters)** — the file contains exactly what is on screen
 

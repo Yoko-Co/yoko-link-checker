@@ -133,8 +133,8 @@ class AdminController {
 	public function register_menu(): void {
 		$hook = add_submenu_page(
 			self::PARENT_SLUG,
-			__( 'Link Checker', 'yoko-link-checker' ),
-			__( 'Link Checker', 'yoko-link-checker' ),
+			__( 'Yoko Link Checker', 'yoko-link-checker' ),
+			__( 'Yoko Link Checker', 'yoko-link-checker' ),
 			self::VIEW_CAP,
 			self::MENU_SLUG,
 			array( $this, 'render' )
@@ -379,7 +379,7 @@ class AdminController {
 	public function render_settings(): void {
 		if ( ! self::can_manage_settings() ) {
 			wp_die(
-				esc_html__( 'You do not have permission to change Link Checker settings.', 'yoko-link-checker' ),
+				esc_html__( 'You do not have permission to change Yoko Link Checker settings.', 'yoko-link-checker' ),
 				'',
 				array( 'response' => 403 )
 			);

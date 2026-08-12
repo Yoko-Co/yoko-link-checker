@@ -318,7 +318,7 @@ final class HttpClient {
 
 		// Site owners who see this in their logs should be able to reach the site
 		// making the request, so identify the site rather than a placeholder.
-		return "YokoLinkChecker/{$version} (WordPress Link Checker; +" . home_url( '/' ) . ')';
+		return "YokoLinkChecker/{$version} (Yoko Link Checker; +" . home_url( '/' ) . ')';
 	}
 
 	/**

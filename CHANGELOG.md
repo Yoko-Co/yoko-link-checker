@@ -14,7 +14,10 @@ counts that disagreed between screens, and hardens the link checker's outbound
 requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
 
 ### Changed
-- **Admin screen moved from a top-level menu to Tools → Link Checker.** Dashboard,
+- **The admin UI now says "Yoko Link Checker" everywhere**, not "Link Checker" —
+  the menu entry, all three page headings, the Settings permission notice and the
+  outbound User-Agent. The short name left it unclear who owns the tool.
+- **Admin screen moved from a top-level menu to Tools → Yoko Link Checker.** Dashboard,
   Reports and Settings are now tabs on a single screen rather than three menu
   entries. All internal links build their URLs through `AdminController::page_url()`,
   so the screen can be relocated again from one constant.
@@ -35,6 +38,18 @@ requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
 - `Requires at least` documented alongside a new `Tested up to: 7.0` header.
 
 ### Fixed
+- **"Last scan" reported the wrong time on every site not set to UTC.** Datetimes
+  are stored with `current_time( 'mysql' )` (site-local) but were read back with a
+  bare `strtotime()`, which parses as UTC — adding the site's UTC offset to every
+  age. On a UTC-4 site a scan that had just finished read "4 hours ago", and one
+  from yesterday read 28 hours. Scan *duration* was unaffected, because
+  subtracting two equally wrong timestamps cancels the error, which is why it
+  looked correct next to a wrong figure. All reads now go through
+  `Util\StoredTime`; the same bug affected "Last Checked" in the Reports table and
+  on the dashboard.
+- **A just-started scan could be killed as stale.** The same misreading was applied
+  to `started_at` in the 30-minute staleness check, so on a UTC-4 site a healthy
+  scan looked 4 hours idle whenever the last-activity option had not been written yet.
 - **Search no longer breaks pagination.** The count query ignored the search term
   while the row query applied it, so searching advertised pages that rendered empty.
 - **The 'error' status is reachable.** It was counted in the dashboard total but

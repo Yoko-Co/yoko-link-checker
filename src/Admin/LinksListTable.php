@@ -18,6 +18,7 @@ use YokoLinkChecker\Repository\LinkQuery;
 use YokoLinkChecker\Repository\LinkRepository;
 use YokoLinkChecker\Repository\LinkStats;
 use YokoLinkChecker\Model\Url;
+use YokoLinkChecker\Util\StoredTime;
 use WP_List_Table;
 
 // Load WP_List_Table if not available.
@@ -473,17 +474,16 @@ class LinksListTable extends WP_List_Table {
 			return __( 'Never', 'yoko-link-checker' );
 		}
 
-		$timestamp = strtotime( $item->last_checked );
+		$time_ago = StoredTime::time_ago( $item->last_checked );
 
-		if ( false === $timestamp ) {
+		if ( null === $time_ago ) {
 			return __( 'Unknown', 'yoko-link-checker' );
 		}
 
 		return sprintf(
 			'<span title="%s">%s</span>',
-			esc_attr( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $timestamp ) ),
-			/* translators: %s: human-readable time difference */
-			sprintf( __( '%s ago', 'yoko-link-checker' ), human_time_diff( $timestamp ) )
+			esc_attr( StoredTime::format( $item->last_checked ) ),
+			esc_html( $time_ago )
 		);
 	}
 

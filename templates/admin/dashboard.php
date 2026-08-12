@@ -13,6 +13,7 @@
  */
 
 use YokoLinkChecker\Admin\AdminController;
+use YokoLinkChecker\Util\StoredTime;
 
 defined( 'ABSPATH' ) || exit;
 
@@ -20,7 +21,7 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 ?>
 
 <div class="wrap ylc-dashboard">
-	<h1><?php esc_html_e( 'Link Checker', 'yoko-link-checker' ); ?></h1>
+	<h1><?php esc_html_e( 'Yoko Link Checker', 'yoko-link-checker' ); ?></h1>
 
 	<?php require YOKO_LC_PLUGIN_DIR . 'templates/admin/tab-nav.php'; ?>
 
@@ -210,15 +211,14 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 					</td>
 					<td>
 						<?php
-						if ( $yoko_lc_link['last_checked'] ) {
-							$yoko_lc_timestamp = strtotime( $yoko_lc_link['last_checked'] );
-							if ( false === $yoko_lc_timestamp ) {
-								esc_html_e( 'Unknown', 'yoko-link-checker' );
-							} else {
-								echo esc_html( human_time_diff( $yoko_lc_timestamp ) . ' ' . __( 'ago', 'yoko-link-checker' ) );
-							}
-						} else {
+						$yoko_lc_time_ago = StoredTime::time_ago( $yoko_lc_link['last_checked'] );
+
+						if ( null !== $yoko_lc_time_ago ) {
+							echo esc_html( $yoko_lc_time_ago );
+						} elseif ( empty( $yoko_lc_link['last_checked'] ) ) {
 							esc_html_e( 'Never', 'yoko-link-checker' );
+						} else {
+							esc_html_e( 'Unknown', 'yoko-link-checker' );
 						}
 						?>
 					</td>

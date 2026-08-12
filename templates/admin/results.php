@@ -21,7 +21,7 @@ $yoko_lc_list_table = $this->get_list_table();
 ?>
 
 <div class="wrap ylc-results">
-	<h1 class="wp-heading-inline"><?php esc_html_e( 'Link Checker', 'yoko-link-checker' ); ?></h1>
+	<h1 class="wp-heading-inline"><?php esc_html_e( 'Yoko Link Checker', 'yoko-link-checker' ); ?></h1>
 
 	<?php require YOKO_LC_PLUGIN_DIR . 'templates/admin/tab-nav.php'; ?>
 

@@ -46,7 +46,7 @@ Yoko Link Checker helps you identify and fix broken links across your WordPress 
 
 ## Usage
 
-1. Navigate to **Tools → Link Checker** in the WordPress admin
+1. Navigate to **Tools → Yoko Link Checker** in the WordPress admin
 2. Click **Start Scan** to begin scanning your content
 3. Watch real-time progress as links are discovered and checked
 4. Open the **Reports** tab to view detailed results

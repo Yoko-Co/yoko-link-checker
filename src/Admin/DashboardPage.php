@@ -21,6 +21,7 @@ use YokoLinkChecker\Repository\ScanRepository;
 use YokoLinkChecker\Repository\StatusCounts;
 use YokoLinkChecker\Scanner\ScanOrchestrator;
 use YokoLinkChecker\Model\Url;
+use YokoLinkChecker\Util\StoredTime;
 
 /**
  * Dashboard page class.
@@ -207,17 +208,7 @@ class DashboardPage {
 			return __( 'Never', 'yoko-link-checker' );
 		}
 
-		$timestamp = strtotime( $scan->completed_at );
-
-		if ( false === $timestamp ) {
-			return __( 'Unknown', 'yoko-link-checker' );
-		}
-
-		return sprintf(
-			/* translators: %s: human-readable time difference */
-			__( '%s ago', 'yoko-link-checker' ),
-			human_time_diff( $timestamp, time() )
-		);
+		return StoredTime::time_ago( $scan->completed_at ) ?? __( 'Unknown', 'yoko-link-checker' );
 	}
 
 	/**
@@ -232,10 +223,13 @@ class DashboardPage {
 			return '—';
 		}
 
-		$start = strtotime( $scan->started_at );
-		$end   = strtotime( $scan->completed_at );
+		// Duration was the one time display that always looked right: both ends
+		// were converted equally wrongly, so the error cancelled. Converted
+		// properly now regardless, so there is one way to read a stored datetime.
+		$start = StoredTime::to_timestamp( $scan->started_at );
+		$end   = StoredTime::to_timestamp( $scan->completed_at );
 
-		if ( false === $start || false === $end ) {
+		if ( null === $start || null === $end ) {
 			return "\xE2\x80\x94"; // em-dash.
 		}
 

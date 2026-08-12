@@ -19,6 +19,7 @@ use YokoLinkChecker\Repository\ScanRepository;
 use YokoLinkChecker\Repository\UrlRepository;
 use YokoLinkChecker\Model\Scan;
 use YokoLinkChecker\Util\Logger;
+use YokoLinkChecker\Util\StoredTime;
 
 /**
  * Scan orchestrator class.
@@ -95,9 +96,14 @@ class ScanOrchestrator {
 		$running = $this->scan_repository->get_running();
 		if ( $running ) {
 			// Check for stale scan (no progress in 30 minutes).
-			$stale_threshold = strtotime( '-30 minutes' );
+			// The last-activity option holds a real time() value; started_at is a
+			// site-local datetime and must be converted before the two can be
+			// compared. Reading it with a bare strtotime() made a just-started
+			// scan look hours old on any site not set to UTC, so the fallback
+			// branch failed healthy scans.
+			$stale_threshold = time() - ( 30 * MINUTE_IN_SECONDS );
 			$last_activity   = $this->get_scan_last_activity( $running->id );
-			$last_update     = $last_activity ? $last_activity : strtotime( $running->started_at );
+			$last_update     = $last_activity ? $last_activity : StoredTime::to_timestamp( $running->started_at );
 
 			if ( $last_update && $last_update < $stale_threshold ) {
 				Logger::debug( 'start_scan - Stale scan detected, failing it', array( 'scan_id' => $running->id ) );

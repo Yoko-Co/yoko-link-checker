@@ -24,7 +24,7 @@ use YokoLinkChecker\Plugin;
 use YokoLinkChecker\Repository\LinkQuery;
 
 /**
- * Manage and inspect Link Checker statistics.
+ * Manage and inspect Yoko Link Checker statistics.
  *
  * @since 1.2.0
  */
