@@ -179,6 +179,44 @@
 	color: var(--ylc-color-pending);
 }
 
+.ylc-stat-needs-review .ylc-stat-number {
+	color: var(--ylc-color-blocked);
+}
+
+/* The second unit. Cards lead with unique URLs; this line says how many link
+   occurrences those URLs account for, so the dashboard and the Reports tab
+   (which necessarily counts occurrences) can be compared without confusion. */
+.ylc-stat-sub {
+	color: #787c82;
+	font-size: 11px;
+	margin-top: 3px;
+}
+
+.ylc-stat-parts {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 4px 10px;
+	justify-content: center;
+	margin-top: 8px;
+}
+
+.ylc-stat-parts a {
+	font-size: 11px;
+	text-decoration: none;
+}
+
+.ylc-ignored-note {
+	margin: -10px 0 20px;
+}
+
+/* ==========================================================================
+   Tab Navigation
+   ========================================================================== */
+
+.ylc-tab-nav {
+	margin-bottom: 20px;
+}
+
 /* ==========================================================================
    Status Labels
    ========================================================================== */

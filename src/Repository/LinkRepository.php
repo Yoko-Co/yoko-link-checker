@@ -2,8 +2,10 @@
 /**
  * Link Repository.
  *
- * Handles CRUD operations for the yoko_lc_links table.
- * Manages link occurrences in content.
+ * Handles CRUD operations for the yoko_lc_links table, which stores one row per
+ * link *occurrence* -- the same URL in twelve posts is twelve rows here and one
+ * row in the urls table. Counting lives in LinkStats, not here, so that the
+ * distinction is made in exactly one place.
  *
  * @package YokoLinkChecker
  * @since   1.0.0
@@ -236,29 +238,24 @@ final class LinkRepository {
 
 	/**
 	 * Get links with URL data for list table display.
-	 * Returns flat stdClass objects for direct use in WP_List_Table.
+	 *
+	 * Returns flat stdClass objects for direct use in WP_List_Table. The WHERE
+	 * clause comes from the same LinkQuery that LinkStats::count_links() uses,
+	 * so the rows shown and the "N items" count can never describe different
+	 * sets -- the search-term-ignored-by-the-counter bug is structurally gone.
 	 *
 	 * @since 1.0.0
-	 * @param array<string, mixed> $args Query arguments.
+	 * @since 1.2.0 Takes a LinkQuery instead of a loose args array.
+	 * @param LinkQuery $query Filters, sort and pagination.
 	 * @return array<\stdClass>
 	 */
-	public function get_links_with_urls( array $args = array() ): array {
+	public function get_links_with_urls( LinkQuery $query ): array {
 		global $wpdb;
 
-		$defaults = array(
-			'per_page' => 20,
-			'page'     => 1,
-			'orderby'  => 'last_checked',
-			'order'    => 'DESC',
-			'status'   => null,
-			'search'   => '',
-		);
+		list( $where, $params ) = $query->to_where( $wpdb );
 
-		$args   = wp_parse_args( $args, $defaults );
-		$offset = ( $args['page'] - 1 ) * $args['per_page'];
-
-		// Build base query with aliased columns for list table compatibility.
-		$sql = "SELECT 
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names derive from $wpdb->prefix; ORDER BY comes from LinkQuery's allow-list.
+		$sql = "SELECT
 				l.id as link_id,
 				l.source_id as post_id,
 				l.source_type,
@@ -277,97 +274,104 @@ final class LinkRepository {
 				u.last_checked,
 				u.is_ignored as ignored,
 				u.response_time
-				FROM {$this->table} l 
-				JOIN {$this->urls_table} u ON l.url_id = u.id 
-				WHERE 1=1"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
+				FROM {$this->table} l
+				JOIN {$this->urls_table} u ON l.url_id = u.id
+				WHERE 1=1{$where}
+				ORDER BY " . $query->to_order_sql() . '
+				LIMIT %d OFFSET %d';
+		// phpcs:enable
 
-		$params = array();
+		$params[] = $query->per_page;
+		$params[] = ( $query->page - 1 ) * $query->per_page;
 
-		// Filter by status.
-		if ( ! empty( $args['status'] ) && 'all' !== $args['status'] ) {
-			$sql     .= ' AND u.status = %s';
-			$params[] = $args['status'];
-		}
-
-		// Search filter.
-		if ( ! empty( $args['search'] ) ) {
-			$search   = '%' . $wpdb->esc_like( $args['search'] ) . '%';
-			$sql     .= ' AND (u.url LIKE %s OR l.anchor_text LIKE %s)';
-			$params[] = $search;
-			$params[] = $search;
-		}
-
-		// Exclude ignored unless specifically requested.
-		if ( empty( $args['include_ignored'] ) ) {
-			$sql     .= ' AND u.is_ignored = %d';
-			$params[] = 0;
-		}
-
-		// Order by.
-		$allowed_orderby = array( 'url', 'status', 'http_code', 'last_checked', 'post_id' );
-		$orderby         = in_array( $args['orderby'], $allowed_orderby, true ) ? $args['orderby'] : 'last_checked';
-		$order           = 'ASC' === strtoupper( $args['order'] ) ? 'ASC' : 'DESC';
-
-		// Map orderby to actual columns.
-		if ( 'url' === $orderby ) {
-			$orderby = 'u.url';
-		} elseif ( 'status' === $orderby ) {
-			$orderby = 'u.status';
-		} elseif ( 'last_checked' === $orderby ) {
-			$orderby = 'u.last_checked';
-		} elseif ( 'http_code' === $orderby ) {
-			$orderby = 'u.http_code';
-		} elseif ( 'post_id' === $orderby ) {
-			$orderby = 'l.source_id';
-		}
-
-		$sql .= " ORDER BY {$orderby} {$order}"; // phpcs:ignore WordPress.DB.PreparedSQL.InterpolatedNotPrepared
-
-		// Pagination.
-		$sql     .= ' LIMIT %d OFFSET %d';
-		$params[] = $args['per_page'];
-		$params[] = $offset;
-
-		// Execute query.
-		if ( ! empty( $params ) ) {
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
-			$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
-		} else {
-			// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
-			$rows = $wpdb->get_results( $sql );
-		}
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- Placeholders come from LinkQuery::to_where().
+		$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
+		// phpcs:enable
 
 		return $rows ? $rows : array();
 	}
 
 	/**
-	 * Count links with optional status filter.
+	 * Delete every link occurrence recorded for a source.
 	 *
-	 * @since 1.0.0
-	 * @param string|null $status Status to filter by, or null for all.
-	 * @return int
+	 * Called when a post is permanently deleted so its links stop counting.
+	 *
+	 * @since 1.2.0
+	 * @param int         $source_id   Source post ID.
+	 * @param string|null $source_type Restrict to one source type, or null for all.
+	 * @return int Number of rows deleted.
 	 */
-	public function count_links_with_status( ?string $status = null ): int {
+	public function delete_by_source( int $source_id, ?string $source_type = null ): int {
 		global $wpdb;
 
-		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names are safe.
-		$sql = "SELECT COUNT(DISTINCT l.id) 
-				FROM {$this->table} l 
-				JOIN {$this->urls_table} u ON l.url_id = u.id 
-				WHERE u.is_ignored = 0";
-		// phpcs:enable
+		$sql    = "DELETE FROM {$this->table} WHERE source_id = %d";
+		$params = array( $source_id );
 
-		if ( ! empty( $status ) && 'all' !== $status ) {
-			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-			// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- $sql is built safely above.
-			return (int) $wpdb->get_var(
-				$wpdb->prepare( $sql . ' AND u.status = %s', $status )
-			);
-			// phpcs:enable
+		if ( null !== $source_type ) {
+			$sql     .= ' AND source_type = %s';
+			$params[] = $source_type;
 		}
 
-		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching,WordPress.DB.PreparedSQL.NotPrepared
-		return (int) $wpdb->get_var( $sql );
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name derives from $wpdb->prefix.
+		return (int) $wpdb->query( $wpdb->prepare( $sql, $params ) );
+		// phpcs:enable
+	}
+
+	/**
+	 * Delete link rows for a source that were not seen in the latest scan.
+	 *
+	 * Catches links removed from a post's content, which no deletion hook can
+	 * ever see. Passing an empty $keep_ids removes all of the source's links,
+	 * which is the correct behaviour when a post no longer contains any.
+	 *
+	 * @since 1.2.0
+	 * @param int        $source_id   Source post ID.
+	 * @param string     $source_type Source post type.
+	 * @param array<int> $keep_ids    Link IDs still present in the content.
+	 * @return int Number of rows deleted.
+	 */
+	public function delete_stale_for_source( int $source_id, string $source_type, array $keep_ids ): int {
+		global $wpdb;
+
+		$sql    = "DELETE FROM {$this->table} WHERE source_id = %d AND source_type = %s";
+		$params = array( $source_id, $source_type );
+
+		$keep_ids = array_values( array_unique( array_map( 'intval', $keep_ids ) ) );
+
+		if ( ! empty( $keep_ids ) ) {
+			$placeholders = implode( ', ', array_fill( 0, count( $keep_ids ), '%d' ) );
+			$sql         .= " AND id NOT IN ({$placeholders})";
+			$params       = array_merge( $params, $keep_ids );
+		}
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared,WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name derives from $wpdb->prefix; placeholders built above.
+		// phpcs:disable WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare
+		return (int) $wpdb->query( $wpdb->prepare( $sql, $params ) );
+		// phpcs:enable
+	}
+
+	/**
+	 * Delete link rows whose source post no longer exists.
+	 *
+	 * DEBUG: `wp yoko-lc prune` calls this; `wp yoko-lc verify` reports the count.
+	 *
+	 * @since 1.2.0
+	 * @return int Number of rows deleted.
+	 */
+	public function delete_orphans(): int {
+		global $wpdb;
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name derives from $wpdb->prefix.
+		return (int) $wpdb->query(
+			"DELETE l FROM {$this->table} l
+			 LEFT JOIN {$wpdb->posts} p ON l.source_id = p.ID
+			 WHERE p.ID IS NULL"
+		);
+		// phpcs:enable
 	}
 
 	/**
@@ -379,43 +383,49 @@ final class LinkRepository {
 	 *
 	 * @since 1.0.9
 	 * @since 1.0.10 Switched from LIMIT/OFFSET to keyset pagination for O(n) performance.
-	 * @param int $chunk_size Number of rows to fetch per database query. Default 1000.
+	 * @since 1.2.0 Applies the caller's LinkQuery so the file matches the screen it
+	 *              was exported from, and joins posts on ID alone -- the old join
+	 *              also required source_type = 'post', which blanked the source
+	 *              columns for every page and custom post type.
+	 * @param LinkQuery $query      Filters to apply.
+	 * @param int       $chunk_size Number of rows to fetch per database query. Default 1000.
 	 * @return \Generator<int, \stdClass> Yields stdClass row objects with source_url populated.
 	 */
-	public function stream_for_export( int $chunk_size = 1000 ): \Generator {
+	public function stream_for_export( LinkQuery $query, int $chunk_size = 1000 ): \Generator {
 		global $wpdb;
 
-		$chunk_size = max( 1, $chunk_size );
-		$last_id    = 0;
+		$chunk_size             = max( 1, $chunk_size );
+		$last_id                = 0;
+		list( $where, $filter ) = $query->to_where( $wpdb );
 
 		do {
+			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names derive from $wpdb->prefix.
+			$sql = "SELECT
+					l.id,
+					u.url,
+					u.status,
+					u.http_code,
+					u.error_message,
+					u.last_checked,
+					l.anchor_text as link_text,
+					l.source_id,
+					l.source_type,
+					p.post_title,
+					p.post_type
+				FROM {$this->table} l
+				JOIN {$this->urls_table} u ON l.url_id = u.id
+				LEFT JOIN {$wpdb->posts} p ON l.source_id = p.ID
+				WHERE l.id > %d{$where}
+				ORDER BY l.id ASC
+				LIMIT %d";
+			// phpcs:enable
+
+			// Keyset cursor comes first in the SQL, so it leads the parameter list.
+			$params = array_merge( array( $last_id ), $filter, array( $chunk_size ) );
+
 			// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-			// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names are safe.
-			$rows = $wpdb->get_results(
-				$wpdb->prepare(
-					"SELECT
-						l.id,
-						u.url,
-						u.status,
-						u.http_code,
-						u.error_message,
-						u.last_checked,
-						l.anchor_text as link_text,
-						l.source_id,
-						l.source_type,
-						p.post_title,
-						p.post_type,
-						p.guid as source_guid
-					FROM {$this->table} l
-					JOIN {$this->urls_table} u ON l.url_id = u.id
-					LEFT JOIN {$wpdb->posts} p ON l.source_id = p.ID AND l.source_type = 'post'
-					WHERE l.id > %d
-					ORDER BY l.id ASC
-					LIMIT %d",
-					$last_id,
-					$chunk_size
-				)
-			);
+			// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- Placeholders come from LinkQuery::to_where().
+			$rows = $wpdb->get_results( $wpdb->prepare( $sql, $params ) );
 			// phpcs:enable
 
 			if ( empty( $rows ) ) {
@@ -425,7 +435,7 @@ final class LinkRepository {
 			// Prime post caches in a single query to avoid N+1 get_permalink() calls.
 			$post_ids = array();
 			foreach ( $rows as $row ) {
-				if ( ! empty( $row->source_id ) && 'post' === $row->source_type ) {
+				if ( null !== $row->post_title ) {
 					$post_ids[] = (int) $row->source_id;
 				}
 			}
@@ -434,11 +444,9 @@ final class LinkRepository {
 			}
 
 			foreach ( $rows as $row ) {
-				if ( ! empty( $row->source_id ) && 'post' === $row->source_type ) {
-					$row->source_url = get_permalink( (int) $row->source_id );
-				} else {
-					$row->source_url = '';
-				}
+				// A null post_title means the join found no post -- the source is either
+				// deleted or not a post at all, so there is no permalink to offer.
+				$row->source_url = null === $row->post_title ? '' : (string) get_permalink( (int) $row->source_id );
 				yield $row;
 			}
 
@@ -450,28 +458,35 @@ final class LinkRepository {
 	/**
 	 * Get recent broken links with source and post data.
 	 *
-	 * Returns broken URLs joined with their link occurrences and post titles.
+	 * Returns broken URLs joined with one representative link occurrence, plus
+	 * how many occurrences each URL has -- the dashboard leads with unique URLs,
+	 * so it has to say how much work each one actually represents.
 	 *
 	 * @since 1.0.8
-	 * @param int $limit Maximum broken links to return.
+	 * @since 1.2.0 Excludes ignored URLs (they are hidden everywhere else, so
+	 *              listing them here contradicted the Reports page this links to),
+	 *              picks the representative occurrence deterministically instead
+	 *              of relying on an unordered LIMIT 1, and counts occurrences.
+	 * @param int $limit Maximum broken URLs to return.
 	 * @return array<array<string, mixed>>
 	 */
 	public function get_recent_broken( int $limit = 10 ): array {
 		global $wpdb;
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
-		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names are safe.
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names derive from $wpdb->prefix.
 		$results = $wpdb->get_results(
 			$wpdb->prepare(
 				"SELECT u.id, u.url, u.http_code, u.error_message, u.last_checked,
 				        l.source_id, l.source_type, l.anchor_text,
-				        p.post_title
+				        p.post_title,
+				        (SELECT COUNT(*) FROM {$this->table} lc WHERE lc.url_id = u.id) AS occurrences
 				 FROM {$this->urls_table} u
-				 LEFT JOIN {$this->table} l ON l.id = (
-				     SELECT l2.id FROM {$this->table} l2 WHERE l2.url_id = u.id LIMIT 1
+				 JOIN {$this->table} l ON l.id = (
+				     SELECT l2.id FROM {$this->table} l2 WHERE l2.url_id = u.id ORDER BY l2.id ASC LIMIT 1
 				 )
 				 LEFT JOIN {$wpdb->posts} p ON l.source_id = p.ID
-				 WHERE u.status = %s
+				 WHERE u.status = %s AND u.is_ignored = 0
 				 ORDER BY u.last_checked DESC
 				 LIMIT %d",
 				Url::STATUS_BROKEN,
@@ -483,23 +498,18 @@ final class LinkRepository {
 		$broken = array();
 
 		foreach ( $results as $row ) {
-			$source_id  = $row->source_id ? (int) $row->source_id : 0;
-			$post_title = '';
-
-			if ( $source_id ) {
-				$post_title = $row->post_title ?? '';
-			}
-
 			$broken[] = array(
 				'id'            => (int) $row->id,
 				'url'           => $row->url,
 				'http_code'     => (int) $row->http_code,
 				'error_message' => $row->error_message,
 				'last_checked'  => $row->last_checked,
-				'source_id'     => $source_id,
+				'source_id'     => (int) $row->source_id,
 				'source_type'   => $row->source_type ?? '',
-				'post_title'    => $post_title,
+				// Null when the source post is gone; the template renders a dash.
+				'post_title'    => $row->post_title ?? '',
 				'anchor_text'   => $row->anchor_text,
+				'occurrences'   => (int) $row->occurrences,
 			);
 		}
 

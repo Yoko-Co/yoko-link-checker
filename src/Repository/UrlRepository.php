@@ -26,6 +26,15 @@ use YokoLinkChecker\Util\UrlNormalizer;
 final class UrlRepository {
 
 	/**
+	 * Predicate for "a URL this scan will fetch".
+	 *
+	 * Shared by get_pending() and count_pending_checkable() so the scan's
+	 * numerator and denominator can never describe different populations. Takes
+	 * one %s placeholder for the status.
+	 */
+	private const PENDING_CHECKABLE_WHERE = 'status = %s AND is_ignored = 0';
+
+	/**
 	 * URL normalizer instance.
 	 *
 	 * @var UrlNormalizer
@@ -281,14 +290,15 @@ final class UrlRepository {
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name is safe.
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- PENDING_CHECKABLE_WHERE is a literal constant containing only a %s placeholder.
+		// phpcs:disable WordPress.DB.PreparedSQLPlaceholders.ReplacementsWrongNumber -- The sniff cannot see the placeholder inside the constant.
 		$rows = $wpdb->get_results(
 			$wpdb->prepare(
-				"SELECT * FROM {$this->table} 
-				WHERE status = %s 
-				AND is_ignored = 0 
-				AND id > %d 
-				ORDER BY id ASC 
-				LIMIT %d",
+				"SELECT * FROM {$this->table}
+				WHERE " . self::PENDING_CHECKABLE_WHERE . '
+				AND id > %d
+				ORDER BY id ASC
+				LIMIT %d',
 				Url::STATUS_PENDING,
 				$after_id,
 				$limit
@@ -297,6 +307,34 @@ final class UrlRepository {
 		// phpcs:enable
 
 		return array_map( fn( $row ) => Url::from_row( $row ), $rows );
+	}
+
+	/**
+	 * Count the URLs a scan will actually fetch.
+	 *
+	 * Shares its WHERE clause with get_pending() so the scan's denominator and
+	 * the rows it works through always describe the same population -- they
+	 * previously differed by is_ignored, which stalled the progress bar.
+	 *
+	 * DEBUG: wp eval 'var_dump( yoko_lc()->url_repository()->count_pending_checkable() );'
+	 *
+	 * @since 1.2.0
+	 * @return int
+	 */
+	public function count_pending_checkable(): int {
+		global $wpdb;
+
+		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
+		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name derives from $wpdb->prefix.
+		// phpcs:disable WordPress.DB.PreparedSQL.NotPrepared -- PENDING_CHECKABLE_WHERE is a literal constant containing only a %s placeholder.
+		// phpcs:disable WordPress.DB.PreparedSQLPlaceholders.UnfinishedPrepare -- The sniff cannot see the placeholder inside the constant.
+		return (int) $wpdb->get_var(
+			$wpdb->prepare(
+				"SELECT COUNT(*) FROM {$this->table} WHERE " . self::PENDING_CHECKABLE_WHERE,
+				Url::STATUS_PENDING
+			)
+		);
+		// phpcs:enable
 	}
 
 	/**
@@ -326,7 +364,14 @@ final class UrlRepository {
 	}
 
 	/**
-	 * Get status counts.
+	 * Get status counts across every URL row.
+	 *
+	 * Counts URL rows directly, with no join to links and no ignored filter, so
+	 * this does NOT match what any screen displays -- LinkStats::status_counts()
+	 * is the number users see. Kept for diagnostics: a difference between the two
+	 * is exactly the population of orphaned or ignored URLs.
+	 *
+	 * DEBUG: compare against `wp yoko-lc counts` when investigating a discrepancy.
 	 *
 	 * @since 1.0.0
 	 * @return array<string, int>

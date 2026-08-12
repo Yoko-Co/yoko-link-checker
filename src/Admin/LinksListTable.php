@@ -14,8 +14,11 @@ namespace YokoLinkChecker\Admin;
 
 defined( 'ABSPATH' ) || exit;
 
+use YokoLinkChecker\Repository\LinkQuery;
 use YokoLinkChecker\Repository\LinkRepository;
+use YokoLinkChecker\Repository\LinkStats;
 use YokoLinkChecker\Model\Url;
+use YokoLinkChecker\Util\StoredTime;
 use WP_List_Table;
 
 // Load WP_List_Table if not available.
@@ -31,6 +34,11 @@ if ( ! class_exists( 'WP_List_Table' ) ) {
 class LinksListTable extends WP_List_Table {
 
 	/**
+	 * Screen option name for rows per page.
+	 */
+	public const PER_PAGE_OPTION = 'yoko_lc_links_per_page';
+
+	/**
 	 * Link repository instance.
 	 *
 	 * @var LinkRepository
@@ -38,27 +46,32 @@ class LinksListTable extends WP_List_Table {
 	private LinkRepository $link_repository;
 
 	/**
-	 * Status filter.
+	 * Link statistics service.
 	 *
-	 * @var string
+	 * @var LinkStats
 	 */
-	private string $status_filter = 'broken';
+	private LinkStats $link_stats;
 
 	/**
-	 * Items per page.
+	 * The query describing what this table is showing.
 	 *
-	 * @var int
+	 * @var LinkQuery
 	 */
-	private int $per_page = 20;
+	private LinkQuery $query;
 
 	/**
 	 * Constructor.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Takes a LinkQuery and the stats service.
 	 * @param LinkRepository $link_repository Link repository.
+	 * @param LinkStats      $link_stats      Link statistics service.
+	 * @param LinkQuery      $query           Filters for this view.
 	 */
-	public function __construct( LinkRepository $link_repository ) {
+	public function __construct( LinkRepository $link_repository, LinkStats $link_stats, LinkQuery $query ) {
 		$this->link_repository = $link_repository;
+		$this->link_stats      = $link_stats;
+		$this->query           = $query;
 
 		parent::__construct(
 			array(
@@ -70,14 +83,92 @@ class LinksListTable extends WP_List_Table {
 	}
 
 	/**
-	 * Set status filter.
+	 * Status filter tabs with per-status counts.
 	 *
-	 * @since 1.0.0
-	 * @param string $status Status to filter by.
-	 * @return void
+	 * Counts are link occurrences so the number on a tab matches the "N items"
+	 * of the screen it leads to; the title attribute carries the unique-URL
+	 * figure, which is the number the dashboard leads with. Both come from the
+	 * same memoized query as the pagination total.
+	 *
+	 * @since 1.2.0
+	 * @return array<string, string>
 	 */
-	public function set_filter( string $status ): void {
-		$this->status_filter = $status;
+	protected function get_views(): array {
+		$counts = $this->link_stats->status_counts( $this->query );
+		$views  = array();
+
+		$views['all'] = $this->build_view(
+			'all',
+			__( 'All', 'yoko-link-checker' ),
+			$counts->total_links(),
+			$counts->total_urls(),
+			null === $this->query->status && ! $this->query->ignored_only
+		);
+
+		foreach ( Url::STATUSES as $status ) {
+			$views[ $status ] = $this->build_view(
+				$status,
+				Url::label_for( $status ),
+				$counts->links( $status ),
+				$counts->urls( $status ),
+				$status === $this->query->status && ! $this->query->ignored_only
+			);
+		}
+
+		// Ignored is a separate view rather than a status: ignoring flags the URL,
+		// so its rows are excluded from every other tab by definition.
+		$ignored = $this->link_stats->status_counts( new LinkQuery( null, $this->query->search, true ) );
+
+		$views['ignored'] = sprintf(
+			'<a href="%1$s"%2$s title="%3$s">%4$s <span class="count">(%5$s)</span></a>',
+			esc_url( AdminController::page_url( 'reports', array( 'ignored' => '1' ) ) ),
+			$this->query->ignored_only ? ' class="current" aria-current="page"' : '',
+			esc_attr(
+				sprintf(
+					/* translators: %s: number of unique URLs */
+					__( '%s unique URLs', 'yoko-link-checker' ),
+					number_format_i18n( $ignored->total_urls() )
+				)
+			),
+			esc_html__( 'Ignored', 'yoko-link-checker' ),
+			esc_html( number_format_i18n( $ignored->total_links() ) )
+		);
+
+		return $views;
+	}
+
+	/**
+	 * Build one status filter tab.
+	 *
+	 * @since 1.2.0
+	 * @param string $status  Status slug, or 'all'.
+	 * @param string $label   Translated label.
+	 * @param int    $links   Link occurrences with this status.
+	 * @param int    $urls    Unique URLs with this status.
+	 * @param bool   $current Whether this is the active view.
+	 * @return string
+	 */
+	private function build_view( string $status, string $label, int $links, int $urls, bool $current ): string {
+		$args = array( 'status' => $status );
+
+		if ( '' !== $this->query->search ) {
+			$args['s'] = $this->query->search;
+		}
+
+		return sprintf(
+			'<a href="%1$s"%2$s title="%3$s">%4$s <span class="count">(%5$s)</span></a>',
+			esc_url( AdminController::page_url( 'reports', $args ) ),
+			$current ? ' class="current" aria-current="page"' : '',
+			esc_attr(
+				sprintf(
+					/* translators: %s: number of unique URLs */
+					__( '%s unique URLs', 'yoko-link-checker' ),
+					number_format_i18n( $urls )
+				)
+			),
+			esc_html( $label ),
+			esc_html( number_format_i18n( $links ) )
+		);
 	}
 
 	/**
@@ -127,40 +218,25 @@ class LinksListTable extends WP_List_Table {
 	/**
 	 * Prepare items.
 	 *
+	 * The rows and the total both come from $this->query, so "N items" always
+	 * describes the rows on screen. Previously the count query ignored the
+	 * search term, which advertised pages that rendered empty.
+	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Rows and count share one LinkQuery.
 	 * @return void
 	 */
 	public function prepare_items(): void {
-		$columns  = $this->get_columns();
-		$hidden   = array();
-		$sortable = $this->get_sortable_columns();
+		$this->_column_headers = array( $this->get_columns(), array(), $this->get_sortable_columns() );
 
-		$this->_column_headers = array( $columns, $hidden, $sortable );
+		$total_items = $this->link_stats->count_links( $this->query );
+		$total_pages = (int) max( 1, ceil( $total_items / $this->query->per_page ) );
 
-		// Get current page.
-		$current_page = $this->get_pagenum();
+		// A stale ?paged= (bookmarked, or left behind by a narrowing filter) would
+		// otherwise render an empty table with no explanation.
+		$this->query->page = min( $this->get_pagenum(), $total_pages );
 
-		// Build query args.
-		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- List table parameters don't require nonce.
-		$args = array(
-			'per_page' => $this->per_page,
-			'page'     => $current_page,
-			'orderby'  => isset( $_GET['orderby'] ) ? sanitize_key( $_GET['orderby'] ) : 'last_checked',
-			'order'    => isset( $_GET['order'] ) ? strtoupper( sanitize_key( $_GET['order'] ) ) : 'DESC',
-		);
-
-		if ( 'all' !== $this->status_filter ) {
-			$args['status'] = $this->status_filter;
-		}
-
-		// Search.
-		if ( ! empty( $_GET['s'] ) ) {
-			$args['search'] = sanitize_text_field( wp_unslash( $_GET['s'] ) );
-		}
-		// phpcs:enable
-
-		// Get items.
-		$this->items = $this->link_repository->get_links_with_urls( $args );
+		$this->items = $this->link_repository->get_links_with_urls( $this->query );
 
 		// Prime post caches to avoid N+1 get_post() calls in column_source().
 		$post_ids = wp_list_pluck( $this->items, 'post_id' );
@@ -168,15 +244,11 @@ class LinksListTable extends WP_List_Table {
 			_prime_post_caches( array_unique( array_filter( array_map( 'intval', $post_ids ) ) ), true, false );
 		}
 
-		// Get total count.
-		$total_items = $this->link_repository->count_links_with_status( $args['status'] ?? null );
-
-		// Set pagination.
 		$this->set_pagination_args(
 			array(
 				'total_items' => $total_items,
-				'per_page'    => $this->per_page,
-				'total_pages' => ceil( $total_items / $this->per_page ),
+				'per_page'    => $this->query->per_page,
+				'total_pages' => $total_pages,
 			)
 		);
 	}
@@ -189,9 +261,13 @@ class LinksListTable extends WP_List_Table {
 	 * @return string
 	 */
 	protected function column_url( $item ): string {
-		$url           = esc_url( $item->url );
-		$url_display   = esc_html( $this->truncate_url( $item->url, 60 ) );
-		$actions_nonce = wp_create_nonce( "yoko_lc_action_{$item->link_id}" );
+		$url         = esc_url( $item->url );
+		$url_display = esc_html( $this->truncate_url( $item->url, 60 ) );
+		$url_id      = (int) $item->url_id;
+
+		// Ignoring flags the URL, not this one occurrence -- the nonce and the
+		// label both say url so the effect isn't a surprise.
+		$actions_nonce = wp_create_nonce( "yoko_lc_ignore_{$url_id}" );
 
 		$actions = array(
 			'view' => sprintf(
@@ -203,17 +279,18 @@ class LinksListTable extends WP_List_Table {
 
 		if ( empty( $item->ignored ) ) {
 			$actions['ignore'] = sprintf(
-				'<a href="%s">%s</a>',
+				'<a href="%s" title="%s">%s</a>',
 				esc_url(
 					add_query_arg(
 						array(
 							'action'   => 'ignore',
-							'link_id'  => $item->link_id,
+							'url_id'   => $url_id,
 							'_wpnonce' => $actions_nonce,
 						)
 					)
 				),
-				__( 'Ignore', 'yoko-link-checker' )
+				esc_attr__( 'Hides every occurrence of this URL from reports.', 'yoko-link-checker' ),
+				__( 'Ignore this URL', 'yoko-link-checker' )
 			);
 		} else {
 			$actions['unignore'] = sprintf(
@@ -222,12 +299,12 @@ class LinksListTable extends WP_List_Table {
 					add_query_arg(
 						array(
 							'action'   => 'unignore',
-							'link_id'  => $item->link_id,
+							'url_id'   => $url_id,
 							'_wpnonce' => $actions_nonce,
 						)
 					)
 				),
-				__( 'Un-ignore', 'yoko-link-checker' )
+				__( 'Un-ignore this URL', 'yoko-link-checker' )
 			);
 		}
 
@@ -253,17 +330,6 @@ class LinksListTable extends WP_List_Table {
 	 * @return string
 	 */
 	protected function column_status( $item ): string {
-		$status_labels = array(
-			Url::STATUS_PENDING  => __( 'Pending', 'yoko-link-checker' ),
-			Url::STATUS_VALID    => __( 'Valid', 'yoko-link-checker' ),
-			Url::STATUS_REDIRECT => __( 'Redirect', 'yoko-link-checker' ),
-			Url::STATUS_BROKEN   => __( 'Broken', 'yoko-link-checker' ),
-			Url::STATUS_WARNING  => __( 'Warning', 'yoko-link-checker' ),
-			Url::STATUS_BLOCKED  => __( 'Blocked', 'yoko-link-checker' ),
-			Url::STATUS_TIMEOUT  => __( 'Timeout', 'yoko-link-checker' ),
-			Url::STATUS_ERROR    => __( 'Error', 'yoko-link-checker' ),
-		);
-
 		// Status descriptions for tooltips.
 		$status_descriptions = array(
 			Url::STATUS_WARNING  => __( 'The server returned a response that may indicate a problem. This could be a temporary issue or the site may block automated requests.', 'yoko-link-checker' ),
@@ -273,7 +339,7 @@ class LinksListTable extends WP_List_Table {
 			Url::STATUS_REDIRECT => __( 'This URL redirects to a different location. The link still works, but you may want to update it to the final destination.', 'yoko-link-checker' ),
 		);
 
-		$label = $status_labels[ $item->status ] ?? $item->status;
+		$label = Url::label_for( $item->status );
 
 		// Build tooltip from description and/or error message.
 		$tooltip_parts = array();
@@ -408,17 +474,16 @@ class LinksListTable extends WP_List_Table {
 			return __( 'Never', 'yoko-link-checker' );
 		}
 
-		$timestamp = strtotime( $item->last_checked );
+		$time_ago = StoredTime::time_ago( $item->last_checked );
 
-		if ( false === $timestamp ) {
+		if ( null === $time_ago ) {
 			return __( 'Unknown', 'yoko-link-checker' );
 		}
 
 		return sprintf(
 			'<span title="%s">%s</span>',
-			esc_attr( wp_date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $timestamp ) ),
-			/* translators: %s: human-readable time difference */
-			sprintf( __( '%s ago', 'yoko-link-checker' ), human_time_diff( $timestamp ) )
+			esc_attr( StoredTime::format( $item->last_checked ) ),
+			esc_html( $time_ago )
 		);
 	}
 
@@ -441,7 +506,9 @@ class LinksListTable extends WP_List_Table {
 	 * @return void
 	 */
 	public function no_items(): void {
-		if ( 'broken' === $this->status_filter ) {
+		if ( '' !== $this->query->search ) {
+			esc_html_e( 'No links match your search.', 'yoko-link-checker' );
+		} elseif ( Url::STATUS_BROKEN === $this->query->status ) {
 			esc_html_e( 'No broken links found. Great job!', 'yoko-link-checker' );
 		} else {
 			esc_html_e( 'No links found.', 'yoko-link-checker' );
@@ -459,11 +526,22 @@ class LinksListTable extends WP_List_Table {
 		if ( 'top' !== $which ) {
 			return;
 		}
+
+		// The export carries the current filters so the file matches the screen.
+		$export_url = AdminController::page_url(
+			'reports',
+			array_merge(
+				$this->query->to_query_args(),
+				array(
+					'action'   => 'export',
+					'_wpnonce' => wp_create_nonce( 'yoko_lc_export' ),
+				)
+			)
+		);
 		?>
 		<div class="alignleft actions">
-			<a href="<?php echo esc_url( admin_url( 'admin.php?page=yoko-link-checker-results&action=export&_wpnonce=' . wp_create_nonce( 'yoko_lc_export' ) ) ); ?>" 
-				class="button">
-				<?php esc_html_e( 'Export CSV', 'yoko-link-checker' ); ?>
+			<a href="<?php echo esc_url( $export_url ); ?>" class="button">
+				<?php esc_html_e( 'Export CSV (current filters)', 'yoko-link-checker' ); ?>
 			</a>
 		</div>
 		<?php

@@ -217,6 +217,11 @@ class BatchProcessor {
 		$extracted_links = $this->extractor_registry->extract_from_post( $post );
 
 		if ( empty( $extracted_links ) ) {
+			// The post had links before and has none now -- drop the stale rows,
+			// or they keep inflating occurrence counts forever. Emptying a post's
+			// content is the common case here, so this path matters.
+			$this->link_repository->delete_stale_for_source( $post->ID, $post->post_type, array() );
+
 			/** This action is documented below. */
 			do_action( 'yoko_lc_post_processed', $post, 0, $scan_id );
 			return 0;
@@ -251,6 +256,10 @@ class BatchProcessor {
 		}
 
 		if ( empty( $prepared ) ) {
+			// Everything extracted normalised away (mailto:, anchors, and so on),
+			// so this post contributes no links -- same cleanup as above.
+			$this->link_repository->delete_stale_for_source( $post->ID, $post->post_type, array() );
+
 			/** This action is documented below. */
 			do_action( 'yoko_lc_post_processed', $post, 0, $scan_id );
 			return 0;
@@ -306,6 +315,11 @@ class BatchProcessor {
 		// --- Phase 4: insert or update links. ---
 		$link_count = 0;
 
+		// Link rows still present in this post's content. Anything belonging to
+		// the post but absent from this list was removed from the content since
+		// the last scan, and is deleted below.
+		$keep_ids = array();
+
 		foreach ( $prepared as $item ) {
 			$url = $item['url'];
 
@@ -323,6 +337,10 @@ class BatchProcessor {
 				$existing->link_context = $extracted->context;
 				$existing->updated_at   = current_time( 'mysql' );
 				$this->link_repository->update( $existing );
+
+				if ( $existing->id ) {
+					$keep_ids[] = $existing->id;
+				}
 				continue;
 			}
 
@@ -342,8 +360,15 @@ class BatchProcessor {
 
 			if ( $inserted && $inserted->id ) {
 				++$link_count;
+				$keep_ids[] = $inserted->id;
 			}
 		}
+
+		// --- Phase 5: drop links that are no longer in this post's content. ---
+		// DEBUG: edit a post to remove a link, rescan, then `wp yoko-lc counts` --
+		// the link total must fall while the URL total stays put if the URL is
+		// still linked elsewhere.
+		$this->link_repository->delete_stale_for_source( $post->ID, $post->post_type, $keep_ids );
 
 		/**
 		 * Fires after a post has been processed for links.
@@ -369,7 +394,7 @@ class BatchProcessor {
 	 */
 	public function process_checking_batch( int $scan_id, int $after_id = 0, int $batch_size = 10 ): ScanState {
 		$urls       = $this->url_repository->get_pending( $batch_size, $after_id );
-		$total_urls = $this->url_repository->count( Url::STATUS_PENDING );
+		$total_urls = $this->url_repository->count_pending_checkable();
 		$last_id    = $after_id;
 
 		// Separate URLs into external and internal arrays.
@@ -674,78 +699,45 @@ class BatchProcessor {
 	/**
 	 * Check internal URL via HTTP request as fallback.
 	 *
-	 * Used when WordPress functions can't verify the URL.
-	 * Uses a short timeout since internal requests should be fast.
+	 * Used when WordPress functions can't verify the URL -- custom routes,
+	 * plugin pages, archives. Goes through UrlChecker like every other request
+	 * so there is one SSRF gate in the plugin rather than two; this used to be a
+	 * separate hand-rolled wp_remote_head() call with SSL verification disabled
+	 * and no per-hop redirect validation.
 	 *
 	 * @since 1.0.8
+	 * @since 1.2.0 Routed through UrlChecker/HttpClient.
 	 * @param Url $url URL model.
 	 * @return void
 	 */
 	private function check_internal_url_via_http( Url $url ): void {
-		// Use a short timeout for internal requests (same server = fast).
-		$args = array(
-			'timeout'            => 3,
-			'redirection'        => 3,
-			'sslverify'          => false, // Same server, skip SSL verification.
-			'reject_unsafe_urls' => true,  // WordPress core SSRF protection.
-			'user-agent'         => 'Yoko Link Checker Internal Check',
-		);
+		// This site's own host frequently resolves to a private address (local
+		// dev, containers, load balancers), which the SSRF gate blocks by design.
+		// Allow it for this one request, and only for our own host.
+		$allow_own_host = static function ( bool $allow, string $candidate ): bool {
+			$candidate_host = wp_parse_url( $candidate, PHP_URL_HOST );
+			$site_host      = wp_parse_url( home_url(), PHP_URL_HOST );
 
-		/**
-		 * Filters the HTTP request arguments for internal URL fallback checks.
-		 *
-		 * @since 1.0.8
-		 * @param array  $args HTTP request arguments.
-		 * @param string $url  URL being checked.
-		 */
-		$args = apply_filters( 'yoko_lc_internal_http_args', $args, $url->url );
+			return ( $candidate_host && $candidate_host === $site_host ) ? true : $allow;
+		};
 
-		// Use HEAD request first (faster, less resource-intensive).
-		$response = wp_remote_head( $url->url, $args );
+		// WP SEAM: yoko_lc_allow_private_urls -- our own filter, attached only for
+		// the duration of this call so the exemption cannot leak to other URLs.
+		add_filter( 'yoko_lc_allow_private_urls', $allow_own_host, 10, 2 );
 
-		// If HEAD fails with 405, try GET.
-		if ( ! is_wp_error( $response ) ) {
-			$code = wp_remote_retrieve_response_code( $response );
-			if ( 405 === $code ) {
-				$response = wp_remote_get( $url->url, $args );
-			}
+		try {
+			$result = $this->url_checker->check( $url->url );
+		} finally {
+			remove_filter( 'yoko_lc_allow_private_urls', $allow_own_host, 10 );
 		}
 
-		if ( is_wp_error( $response ) ) {
-			$error_message = $response->get_error_message();
-			$error_type    = $response->get_error_code();
-
-			$url->http_code     = null;
-			$url->error_message = $error_message;
-			$url->status        = $this->classifier->classify(
-				null,
-				(string) $error_type,
-				$error_message,
-				$url->url
-			);
-
-			$this->url_repository->update( $url );
-			return;
-		}
-
-		$http_code = wp_remote_retrieve_response_code( $response );
-
-		// Determine final URL from Location header if present.
-		$final_url = null;
-		$headers   = wp_remote_retrieve_headers( $response );
-		if ( isset( $headers['location'] ) ) {
-			$final_url = is_array( $headers['location'] ) ? $headers['location'][0] : $headers['location'];
-		}
-
-		$url->http_code = $http_code;
-		$url->final_url = $final_url;
-		$url->status    = $this->classifier->classify(
-			$http_code,
-			null,
-			null,
-			$url->url,
-			$final_url
-		);
+		$url->status         = $result->status;
+		$url->http_code      = $result->http_code;
+		$url->final_url      = $result->final_url;
+		$url->redirect_count = $result->redirect_count;
+		$url->error_type     = $result->error_type;
+		$url->error_message  = $result->error_message;
+		$url->response_time  = $result->response_time;
 
 		$this->url_repository->update( $url );
 	}

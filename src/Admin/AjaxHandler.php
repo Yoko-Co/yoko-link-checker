@@ -16,8 +16,11 @@ defined( 'ABSPATH' ) || exit;
 
 use YokoLinkChecker\Scanner\ScanOrchestrator;
 use YokoLinkChecker\Scanner\BatchProcessor;
-use YokoLinkChecker\Repository\UrlRepository;
+use YokoLinkChecker\Model\Url;
+use YokoLinkChecker\Repository\LinkQuery;
 use YokoLinkChecker\Repository\LinkRepository;
+use YokoLinkChecker\Repository\LinkStats;
+use YokoLinkChecker\Repository\UrlRepository;
 use YokoLinkChecker\Util\Logger;
 
 /**
@@ -26,6 +29,48 @@ use YokoLinkChecker\Util\Logger;
  * @since 1.0.0
  */
 class AjaxHandler {
+
+	/**
+	 * Every AJAX endpoint, mapped to the capability it requires.
+	 *
+	 * The key is both the method name and the wp_ajax_yoko_lc_{key} suffix, so
+	 * an endpoint cannot exist without a capability declared beside it.
+	 *
+	 * Each also gets its own nonce (see nonce_action()). They previously shared
+	 * one: a nonce leaked from any plugin page -- via a referrer, or any script
+	 * with read access to the localized object -- authorised clear_data, which
+	 * truncates all three tables, exactly as readily as a status poll.
+	 *
+	 * @since 1.2.0
+	 * @var array<string, string>
+	 */
+	private const ACTIONS = array(
+		'start_scan'      => 'yoko_lc_manage_scans',
+		'pause_scan'      => 'yoko_lc_manage_scans',
+		'resume_scan'     => 'yoko_lc_manage_scans',
+		'cancel_scan'     => 'yoko_lc_manage_scans',
+		'get_scan_status' => 'yoko_lc_view_results',
+		'recheck_url'     => 'yoko_lc_manage_scans',
+		'ignore_link'     => 'yoko_lc_manage_scans',
+		'unignore_link'   => 'yoko_lc_manage_scans',
+		'get_stats'       => 'yoko_lc_view_results',
+		// Deletes every scan, URL and link row. Deliberately requires the
+		// strongest capability rather than the scan-management one -- being able
+		// to run a scan is not the same as being able to destroy its history.
+		'clear_data'      => 'manage_options',
+	);
+
+	/**
+	 * How often a status poll may spawn cron, in seconds.
+	 *
+	 * The status endpoint only needs view capability but nudges WP-Cron so a
+	 * running scan keeps moving. Without a floor, a browser polling every couple
+	 * of seconds spawns cron just as often, which a read-only user should not be
+	 * able to do to a server.
+	 *
+	 * @since 1.2.0
+	 */
+	private const CRON_SPAWN_INTERVAL = 30;
 
 	/**
 	 * Scan orchestrator instance.
@@ -56,24 +101,35 @@ class AjaxHandler {
 	private LinkRepository $link_repository;
 
 	/**
+	 * Link statistics service.
+	 *
+	 * @var LinkStats
+	 */
+	private LinkStats $link_stats;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Takes the stats service.
 	 * @param ScanOrchestrator $scan_orchestrator Scan orchestrator.
 	 * @param BatchProcessor   $batch_processor   Batch processor.
 	 * @param UrlRepository    $url_repository    URL repository.
 	 * @param LinkRepository   $link_repository   Link repository.
+	 * @param LinkStats        $link_stats        Link statistics service.
 	 */
 	public function __construct(
 		ScanOrchestrator $scan_orchestrator,
 		BatchProcessor $batch_processor,
 		UrlRepository $url_repository,
-		LinkRepository $link_repository
+		LinkRepository $link_repository,
+		LinkStats $link_stats
 	) {
 		$this->scan_orchestrator = $scan_orchestrator;
 		$this->batch_processor   = $batch_processor;
 		$this->url_repository    = $url_repository;
 		$this->link_repository   = $link_repository;
+		$this->link_stats        = $link_stats;
 	}
 
 	/**
@@ -83,25 +139,40 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function register(): void {
-		// Scan actions.
-		add_action( 'wp_ajax_yoko_lc_start_scan', array( $this, 'start_scan' ) );
-		add_action( 'wp_ajax_yoko_lc_pause_scan', array( $this, 'pause_scan' ) );
-		add_action( 'wp_ajax_yoko_lc_resume_scan', array( $this, 'resume_scan' ) );
-		add_action( 'wp_ajax_yoko_lc_cancel_scan', array( $this, 'cancel_scan' ) );
-		add_action( 'wp_ajax_yoko_lc_get_scan_status', array( $this, 'get_scan_status' ) );
+		// WP SEAM: wp_ajax_{$action} -- one logged-in endpoint per entry in ACTIONS.
+		// No wp_ajax_nopriv_ registrations: nothing here is reachable logged out.
+		foreach ( array_keys( self::ACTIONS ) as $action ) {
+			add_action( "wp_ajax_yoko_lc_{$action}", array( $this, $action ) );
+		}
+	}
 
-		// Link actions.
-		add_action( 'wp_ajax_yoko_lc_recheck_url', array( $this, 'recheck_url' ) );
-		add_action( 'wp_ajax_yoko_lc_ignore_link', array( $this, 'ignore_link' ) );
-		add_action( 'wp_ajax_yoko_lc_unignore_link', array( $this, 'unignore_link' ) );
+	/**
+	 * Nonce action string for an AJAX endpoint.
+	 *
+	 * Public so AdminController can mint the matching nonces for the JS.
+	 *
+	 * @since 1.2.0
+	 * @param string $action Endpoint key from self::ACTIONS.
+	 * @return string
+	 */
+	public static function nonce_action( string $action ): string {
+		return "yoko_lc_ajax_{$action}";
+	}
 
-		// Stats — internal API endpoint. Not currently called by the admin JS
-		// (dashboard stats are rendered server-side), but retained for future
-		// programmatic / REST API access (see #055).
-		add_action( 'wp_ajax_yoko_lc_get_stats', array( $this, 'get_stats' ) );
+	/**
+	 * Every endpoint's nonce, keyed by action, for wp_localize_script().
+	 *
+	 * @since 1.2.0
+	 * @return array<string, string>
+	 */
+	public static function nonces(): array {
+		$nonces = array();
 
-		// Data management.
-		add_action( 'wp_ajax_yoko_lc_clear_data', array( $this, 'clear_data' ) );
+		foreach ( array_keys( self::ACTIONS ) as $action ) {
+			$nonces[ $action ] = wp_create_nonce( self::nonce_action( $action ) );
+		}
+
+		return $nonces;
 	}
 
 	/**
@@ -111,7 +182,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function start_scan(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'start_scan' );
 
 		try {
 			Logger::debug( 'start_scan AJAX called' );
@@ -145,7 +216,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function pause_scan(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'pause_scan' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$scan_id = isset( $_POST['scan_id'] ) ? absint( $_POST['scan_id'] ) : 0;
@@ -170,7 +241,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function resume_scan(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'resume_scan' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$scan_id = isset( $_POST['scan_id'] ) ? absint( $_POST['scan_id'] ) : 0;
@@ -195,7 +266,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function cancel_scan(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'cancel_scan' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$scan_id = isset( $_POST['scan_id'] ) ? absint( $_POST['scan_id'] ) : 0;
@@ -220,7 +291,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function get_scan_status(): void {
-		$this->verify_request( 'yoko_lc_view_results' );
+		$this->verify_request( 'get_scan_status' );
 
 		try {
 			$status = $this->scan_orchestrator->get_status();
@@ -232,7 +303,8 @@ class AjaxHandler {
 				if ( ! wp_next_scheduled( 'yoko_lc_process_scan_batch', array( $status['scan_id'] ) ) ) {
 					wp_schedule_single_event( time(), 'yoko_lc_process_scan_batch', array( $status['scan_id'] ) );
 				}
-				spawn_cron();
+
+				$this->maybe_spawn_cron();
 			}
 		} catch ( \Throwable $e ) {
 			Logger::exception( $e );
@@ -266,7 +338,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function recheck_url(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'recheck_url' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$url_id = isset( $_POST['url_id'] ) ? absint( $_POST['url_id'] ) : 0;
@@ -302,7 +374,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function ignore_link(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'ignore_link' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$link_id = isset( $_POST['link_id'] ) ? absint( $_POST['link_id'] ) : 0;
@@ -342,7 +414,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function unignore_link(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'unignore_link' );
 
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in verify_request().
 		$link_id = isset( $_POST['link_id'] ) ? absint( $_POST['link_id'] ) : 0;
@@ -378,37 +450,84 @@ class AjaxHandler {
 	/**
 	 * Get stats.
 	 *
+	 * Reads from LinkStats like every other surface, and reports both units --
+	 * this endpoint used to be a fifth independent counter with its own shape.
+	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Backed by LinkStats; response now carries both units.
 	 * @return void
 	 */
 	public function get_stats(): void {
-		$this->verify_request( 'yoko_lc_view_results' );
+		$this->verify_request( 'get_stats' );
 
-		$status_counts = $this->url_repository->get_status_counts();
-		$stats         = array(
-			'total'    => array_sum( $status_counts ),
-			'broken'   => $status_counts['broken'] ?? 0,
-			'warning'  => $status_counts['warning'] ?? 0,
-			'redirect' => $status_counts['redirect'] ?? 0,
-			'valid'    => $status_counts['valid'] ?? 0,
-			'pending'  => $status_counts['pending'] ?? 0,
+		$counts = $this->link_stats->status_counts( new LinkQuery() );
+		$stats  = array(
+			'total_urls'  => $counts->total_urls(),
+			'total_links' => $counts->total_links(),
+			'by_status'   => array(),
 		);
+
+		foreach ( Url::STATUSES as $status ) {
+			$stats['by_status'][ $status ] = array(
+				'urls'  => $counts->urls( $status ),
+				'links' => $counts->links( $status ),
+			);
+		}
 
 		wp_send_json_success( $stats );
 	}
 
 	/**
-	 * Verify AJAX request.
+	 * Nudge WP-Cron along, at most once every CRON_SPAWN_INTERVAL seconds.
 	 *
-	 * @since 1.0.0
-	 * @param string $capability Required capability.
+	 * The dashboard polls this endpoint every couple of seconds while a scan
+	 * runs, and the endpoint only requires view capability -- so an unthrottled
+	 * spawn_cron() here hands a read-only user a way to make the server fork a
+	 * cron request on demand, indefinitely. The floor keeps scans moving without
+	 * tying cron frequency to how fast someone can poll.
+	 *
+	 * DEBUG: delete the transient to force the next poll to spawn:
+	 * wp transient delete yoko_lc_cron_spawned
+	 *
+	 * @since 1.2.0
 	 * @return void
 	 */
-	private function verify_request( string $capability ): void {
+	private function maybe_spawn_cron(): void {
+		if ( get_transient( 'yoko_lc_cron_spawned' ) ) {
+			return;
+		}
+
+		set_transient( 'yoko_lc_cron_spawned', time(), self::CRON_SPAWN_INTERVAL );
+
+		spawn_cron();
+	}
+
+	/**
+	 * Verify an AJAX request's nonce and capability.
+	 *
+	 * Takes the action rather than a capability so the two can't be mismatched:
+	 * both the nonce string and the required capability are looked up from
+	 * self::ACTIONS, which is also what registers the endpoint.
+	 *
+	 * @since 1.0.0
+	 * @since 1.2.0 Per-action nonces; capability derived from the action.
+	 * @param string $action Endpoint key from self::ACTIONS.
+	 * @return void
+	 */
+	private function verify_request( string $action ): void {
+		if ( ! isset( self::ACTIONS[ $action ] ) ) {
+			// A handler that forgot to declare itself. Fail loudly in development
+			// rather than silently accepting the request.
+			_doing_it_wrong( __METHOD__, esc_html( "Unknown AJAX action: {$action}" ), '1.2.0' );
+			wp_send_json_error( array( 'message' => __( 'Unknown action.', 'yoko-link-checker' ) ), 400 );
+		}
+
+		$capability = self::ACTIONS[ $action ];
+
 		// Verify nonce.
 		$nonce = isset( $_POST['nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['nonce'] ) ) : '';
 
-		if ( ! wp_verify_nonce( $nonce, 'yoko_lc_admin' ) ) {
+		if ( ! wp_verify_nonce( $nonce, self::nonce_action( $action ) ) ) {
 			wp_send_json_error(
 				array(
 					'message' => __( 'Security check failed.', 'yoko-link-checker' ),
@@ -440,7 +559,7 @@ class AjaxHandler {
 	 * @return void
 	 */
 	public function clear_data(): void {
-		$this->verify_request( 'yoko_lc_manage_scans' );
+		$this->verify_request( 'clear_data' );
 
 		global $wpdb;
 

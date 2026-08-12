@@ -24,7 +24,9 @@ use YokoLinkChecker\Checker\StatusClassifier;
 use YokoLinkChecker\Checker\UrlChecker;
 use YokoLinkChecker\Extractor\ExtractorRegistry;
 use YokoLinkChecker\Extractor\HtmlExtractor;
+use YokoLinkChecker\Cli\StatsCommand;
 use YokoLinkChecker\Repository\LinkRepository;
+use YokoLinkChecker\Repository\LinkStats;
 use YokoLinkChecker\Repository\ScanRepository;
 use YokoLinkChecker\Repository\UrlRepository;
 use YokoLinkChecker\Scanner\BatchProcessor;
@@ -85,6 +87,14 @@ final class Plugin {
 		// Register cron hooks (available in all contexts for WP-Cron).
 		$this->register_cron_hooks();
 
+		// Content hooks run in every context -- posts are deleted from cron and WP-CLI too.
+		$this->register_content_hooks();
+
+		// Register WP-CLI commands when running under WP-CLI.
+		if ( defined( 'WP_CLI' ) && WP_CLI ) {
+			StatsCommand::register( $this );
+		}
+
 		/**
 		 * Fires after the plugin has fully booted.
 		 *
@@ -122,8 +132,42 @@ final class Plugin {
 	 * @return void
 	 */
 	private function register_cron_hooks(): void {
+		// WP SEAM: yoko_lc_process_scan_batch -- our own cron event, one batch per firing.
 		add_action( 'yoko_lc_process_scan_batch', array( $this, 'handle_cron_batch' ), 10, 1 );
+
+		// WP SEAM: yoko_lc_auto_scan -- our own recurring event from the Settings tab.
 		add_action( 'yoko_lc_auto_scan', array( $this, 'handle_auto_scan' ), 10, 0 );
+	}
+
+	/**
+	 * Register hooks that keep stored links in step with site content.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	private function register_content_hooks(): void {
+		// WP SEAM: before_delete_post -- fires on permanent deletion, while the post
+		// row still exists. Prunes that post's link occurrences so occurrence counts
+		// don't drift above URL counts as content is removed. Trash is deliberately
+		// not hooked: trashed posts are recoverable and their links should survive.
+		// DEBUG: wp post delete <id> --force, then `wp yoko-lc verify` -- orphans must be 0.
+		add_action( 'before_delete_post', array( $this, 'handle_post_deleted' ), 10, 1 );
+	}
+
+	/**
+	 * Remove stored link occurrences for a permanently deleted post.
+	 *
+	 * @since 1.2.0
+	 * @param int $post_id ID of the post being deleted.
+	 * @return void
+	 */
+	public function handle_post_deleted( int $post_id ): void {
+		$deleted = $this->link_repository()->delete_by_source( $post_id );
+
+		if ( $deleted > 0 && defined( 'WP_DEBUG' ) && WP_DEBUG ) {
+			// phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log
+			error_log( sprintf( '[yoko-link-checker] Pruned %1$d link(s) for deleted post %2$d.', $deleted, $post_id ) );
+		}
 	}
 
 	/**
@@ -209,6 +253,21 @@ final class Plugin {
 		return $this->get_service(
 			LinkRepository::class,
 			fn() => new LinkRepository()
+		);
+	}
+
+	/**
+	 * Get the link statistics service.
+	 *
+	 * Every count displayed by the plugin comes from here.
+	 *
+	 * @since 1.2.0
+	 * @return LinkStats
+	 */
+	public function link_stats(): LinkStats {
+		return $this->get_service(
+			LinkStats::class,
+			fn() => new LinkStats()
 		);
 	}
 
@@ -358,7 +417,7 @@ final class Plugin {
 			DashboardPage::class,
 			fn() => new DashboardPage(
 				$this->link_repository(),
-				$this->url_repository(),
+				$this->link_stats(),
 				$this->scan_repository(),
 				$this->scan_orchestrator()
 			)
@@ -374,7 +433,7 @@ final class Plugin {
 	public function results_page(): ResultsPage {
 		return $this->get_service(
 			ResultsPage::class,
-			fn() => new ResultsPage( $this->link_repository(), $this->url_repository() )
+			fn() => new ResultsPage( $this->link_repository(), $this->url_repository(), $this->link_stats() )
 		);
 	}
 
@@ -408,7 +467,8 @@ final class Plugin {
 				$this->scan_orchestrator(),
 				$this->batch_processor(),
 				$this->url_repository(),
-				$this->link_repository()
+				$this->link_repository(),
+				$this->link_stats()
 			)
 		);
 	}

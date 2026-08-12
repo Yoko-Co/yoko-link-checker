@@ -12,13 +12,18 @@
  * @var \YokoLinkChecker\Admin\DashboardPage     $this            Dashboard page instance.
  */
 
+use YokoLinkChecker\Admin\AdminController;
+use YokoLinkChecker\Util\StoredTime;
+
 defined( 'ABSPATH' ) || exit;
 
 $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 ?>
 
 <div class="wrap ylc-dashboard">
-	<h1><?php esc_html_e( 'Link Checker Dashboard', 'yoko-link-checker' ); ?></h1>
+	<h1><?php esc_html_e( 'Yoko Link Checker', 'yoko-link-checker' ); ?></h1>
+
+	<?php require YOKO_LC_PLUGIN_DIR . 'templates/admin/tab-nav.php'; ?>
 
 	<!-- Scan Control Section -->
 	<div class="ylc-card ylc-scan-control">
@@ -83,55 +88,84 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 		</div>
 	</div>
 
-	<!-- Stats Grid -->
+	<!--
+		Stats Grid. Each card leads with unique URLs and states the link count
+		underneath: one broken URL used in twelve posts is 1 URL and 12 links,
+		and the Reports tab counts the latter. Saying both is what keeps the two
+		screens from looking like they disagree.
+	-->
 	<div class="ylc-stats-grid">
 		<div class="ylc-stat-card ylc-stat-total">
 			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['total_urls'] ) ); ?></div>
 			<div class="ylc-stat-label"><?php esc_html_e( 'Total URLs', 'yoko-link-checker' ); ?></div>
+			<div class="ylc-stat-sub">
+				<?php
+				printf(
+					/* translators: %s: number of link occurrences */
+					esc_html( _n( 'across %s link', 'across %s links', $stats['total_links'], 'yoko-link-checker' ) ),
+					esc_html( number_format_i18n( $stats['total_links'] ) )
+				);
+				?>
+			</div>
 		</div>
-		
-		<div class="ylc-stat-card ylc-stat-broken">
-			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['broken'] ) ); ?></div>
-			<div class="ylc-stat-label"><?php esc_html_e( 'Broken', 'yoko-link-checker' ); ?></div>
-			<?php if ( $stats['broken'] > 0 ) : ?>
-				<a href="<?php echo esc_url( admin_url( 'admin.php?page=yoko-link-checker-results&status=broken' ) ); ?>" class="ylc-stat-link">
-					<?php esc_html_e( 'View all', 'yoko-link-checker' ); ?> →
-				</a>
-			<?php endif; ?>
-		</div>
-		
-		<div class="ylc-stat-card ylc-stat-warning">
-			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['warnings'] ) ); ?></div>
-			<div class="ylc-stat-label"><?php esc_html_e( 'Warnings', 'yoko-link-checker' ); ?></div>
-			<?php if ( $stats['warnings'] > 0 ) : ?>
-				<a href="<?php echo esc_url( admin_url( 'admin.php?page=yoko-link-checker-results&status=warning' ) ); ?>" class="ylc-stat-link">
-					<?php esc_html_e( 'View all', 'yoko-link-checker' ); ?> →
-				</a>
-			<?php endif; ?>
-		</div>
-		
-		<div class="ylc-stat-card ylc-stat-redirect">
-			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['redirects'] ) ); ?></div>
-			<div class="ylc-stat-label"><?php esc_html_e( 'Redirects', 'yoko-link-checker' ); ?></div>
-		</div>
-		
-		<div class="ylc-stat-card ylc-stat-valid">
-			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['valid'] ) ); ?></div>
-			<div class="ylc-stat-label"><?php esc_html_e( 'Valid', 'yoko-link-checker' ); ?></div>
-		</div>
-		
-		<div class="ylc-stat-card ylc-stat-pending">
-			<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $stats['pending'] ) ); ?></div>
-			<div class="ylc-stat-label"><?php esc_html_e( 'Pending', 'yoko-link-checker' ); ?></div>
-		</div>
+
+		<?php foreach ( $stats['cards'] as $yoko_lc_key => $yoko_lc_card ) : ?>
+			<div class="ylc-stat-card ylc-stat-<?php echo esc_attr( str_replace( '_', '-', $yoko_lc_key ) ); ?>">
+				<div class="ylc-stat-number"><?php echo esc_html( number_format_i18n( $yoko_lc_card['urls'] ) ); ?></div>
+				<div class="ylc-stat-label"><?php echo esc_html( $yoko_lc_card['label'] ); ?></div>
+				<div class="ylc-stat-sub">
+					<?php
+					printf(
+						/* translators: %s: number of link occurrences */
+						esc_html( _n( 'across %s link', 'across %s links', $yoko_lc_card['links'], 'yoko-link-checker' ) ),
+						esc_html( number_format_i18n( $yoko_lc_card['links'] ) )
+					);
+					?>
+				</div>
+
+				<?php if ( ! empty( $yoko_lc_card['parts'] ) ) : ?>
+					<div class="ylc-stat-parts">
+						<?php foreach ( $yoko_lc_card['parts'] as $yoko_lc_part ) : ?>
+							<?php if ( $yoko_lc_part['urls'] > 0 ) : ?>
+								<a href="<?php echo esc_url( AdminController::page_url( 'reports', array( 'status' => $yoko_lc_part['status'] ) ) ); ?>">
+									<?php echo esc_html( $yoko_lc_part['label'] ); ?>
+									<?php echo esc_html( number_format_i18n( $yoko_lc_part['urls'] ) ); ?>
+								</a>
+							<?php endif; ?>
+						<?php endforeach; ?>
+					</div>
+				<?php endif; ?>
+
+				<?php if ( $yoko_lc_card['urls'] > 0 && null !== $yoko_lc_card['status'] ) : ?>
+					<a href="<?php echo esc_url( AdminController::page_url( 'reports', array( 'status' => $yoko_lc_card['status'] ) ) ); ?>" class="ylc-stat-link">
+						<?php esc_html_e( 'View all', 'yoko-link-checker' ); ?> →
+					</a>
+				<?php endif; ?>
+			</div>
+		<?php endforeach; ?>
 	</div>
+
+	<?php if ( $stats['ignored_urls'] > 0 ) : ?>
+		<p class="ylc-ignored-note description">
+			<?php
+			printf(
+				/* translators: %s: number of ignored URLs */
+				esc_html( _n( '%s URL is ignored and excluded from the counts above.', '%s URLs are ignored and excluded from the counts above.', $stats['ignored_urls'], 'yoko-link-checker' ) ),
+				esc_html( number_format_i18n( $stats['ignored_urls'] ) )
+			);
+			?>
+			<a href="<?php echo esc_url( AdminController::page_url( 'reports', array( 'ignored' => '1' ) ) ); ?>">
+				<?php esc_html_e( 'View ignored URLs', 'yoko-link-checker' ); ?>
+			</a>
+		</p>
+	<?php endif; ?>
 
 	<!-- Recent Broken Links -->
 	<?php if ( ! empty( $recent_broken ) ) : ?>
 	<div class="ylc-card ylc-recent-broken">
 		<h2>
 			<?php esc_html_e( 'Recent Broken Links', 'yoko-link-checker' ); ?>
-			<a href="<?php echo esc_url( admin_url( 'admin.php?page=yoko-link-checker-results&status=broken' ) ); ?>" class="ylc-view-all">
+			<a href="<?php echo esc_url( AdminController::page_url( 'reports', array( 'status' => 'broken' ) ) ); ?>" class="ylc-view-all">
 				<?php esc_html_e( 'View all', 'yoko-link-checker' ); ?> →
 			</a>
 		</h2>
@@ -141,6 +175,7 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 				<tr>
 					<th><?php esc_html_e( 'URL', 'yoko-link-checker' ); ?></th>
 					<th><?php esc_html_e( 'Code', 'yoko-link-checker' ); ?></th>
+					<th><?php esc_html_e( 'Found in', 'yoko-link-checker' ); ?></th>
 					<th><?php esc_html_e( 'Source', 'yoko-link-checker' ); ?></th>
 					<th><?php esc_html_e( 'Last Checked', 'yoko-link-checker' ); ?></th>
 				</tr>
@@ -157,6 +192,15 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 						<span class="ylc-code ylc-code-client-error"><?php echo esc_html( $yoko_lc_link['http_code'] ? $yoko_lc_link['http_code'] : '—' ); ?></span>
 					</td>
 					<td>
+						<?php
+						printf(
+							/* translators: %s: number of places the URL is linked from */
+							esc_html( _n( '%s place', '%s places', $yoko_lc_link['occurrences'], 'yoko-link-checker' ) ),
+							esc_html( number_format_i18n( $yoko_lc_link['occurrences'] ) )
+						);
+						?>
+					</td>
+					<td>
 						<?php if ( $yoko_lc_link['source_id'] && $yoko_lc_link['post_title'] ) : ?>
 							<a href="<?php echo esc_url( get_edit_post_link( $yoko_lc_link['source_id'] ) ); ?>">
 								<?php echo esc_html( wp_trim_words( $yoko_lc_link['post_title'], 5, '...' ) ); ?>
@@ -167,15 +211,14 @@ $yoko_lc_is_scanning = $scan_status && 'running' === $scan_status['status'];
 					</td>
 					<td>
 						<?php
-						if ( $yoko_lc_link['last_checked'] ) {
-							$yoko_lc_timestamp = strtotime( $yoko_lc_link['last_checked'] );
-							if ( false === $yoko_lc_timestamp ) {
-								esc_html_e( 'Unknown', 'yoko-link-checker' );
-							} else {
-								echo esc_html( human_time_diff( $yoko_lc_timestamp ) . ' ' . __( 'ago', 'yoko-link-checker' ) );
-							}
-						} else {
+						$yoko_lc_time_ago = StoredTime::time_ago( $yoko_lc_link['last_checked'] );
+
+						if ( null !== $yoko_lc_time_ago ) {
+							echo esc_html( $yoko_lc_time_ago );
+						} elseif ( empty( $yoko_lc_link['last_checked'] ) ) {
 							esc_html_e( 'Never', 'yoko-link-checker' );
+						} else {
+							esc_html_e( 'Unknown', 'yoko-link-checker' );
 						}
 						?>
 					</td>

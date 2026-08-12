@@ -15,7 +15,11 @@ $yoko_lc_post_types = get_post_types( array( 'public' => true ), 'objects' );
 ?>
 
 <div class="wrap ylc-settings">
-	<h1><?php esc_html_e( 'Link Checker Settings', 'yoko-link-checker' ); ?></h1>
+	<h1><?php esc_html_e( 'Yoko Link Checker', 'yoko-link-checker' ); ?></h1>
+
+	<?php require YOKO_LC_PLUGIN_DIR . 'templates/admin/tab-nav.php'; ?>
+
+	<h2><?php esc_html_e( 'Settings', 'yoko-link-checker' ); ?></h2>
 
 	<?php settings_errors( 'yoko_lc_settings' ); ?>
 
@@ -107,6 +111,28 @@ $yoko_lc_post_types = get_post_types( array( 'public' => true ), 'objects' );
 						</select>
 						<p class="description">
 							<?php esc_html_e( 'How often to automatically scan for broken links.', 'yoko-link-checker' ); ?>
+						</p>
+					</td>
+				</tr>
+
+				<!--
+					Uninstall behaviour. uninstall.php has always read this option and
+					defaulted to deleting everything, but nothing ever wrote it -- so
+					there was no way to answer the question until now.
+				-->
+				<tr>
+					<th scope="row"><?php esc_html_e( 'On Uninstall', 'yoko-link-checker' ); ?></th>
+					<td>
+						<label for="yoko_lc_remove_data_on_uninstall">
+							<input type="checkbox"
+									id="yoko_lc_remove_data_on_uninstall"
+									name="yoko_lc_remove_data_on_uninstall"
+									value="1"
+									<?php checked( $settings['remove_data'] ); ?>>
+							<?php esc_html_e( 'Delete all scan data when the plugin is deleted', 'yoko-link-checker' ); ?>
+						</label>
+						<p class="description">
+							<?php esc_html_e( 'Applies only when the plugin is deleted, not when it is deactivated. Untick this to keep your scan history if you ever need to remove and reinstall the plugin. Your posts are never affected either way.', 'yoko-link-checker' ); ?>
 						</p>
 					</td>
 				</tr>

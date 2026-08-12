@@ -51,6 +51,68 @@ final class Url {
 	);
 
 	/**
+	 * Grouping used by the dashboard so every status is visible somewhere.
+	 *
+	 * Blocked, timeout and error are deliberately kept out of "broken":
+	 * most blocked responses are bot protection rather than a dead link, and
+	 * folding them into broken manufactures false positives in the one number
+	 * people act on. They get their own "needs review" bucket instead, so the
+	 * displayed cards always sum to the total.
+	 *
+	 * @since 1.2.0
+	 * @var array<string, array<string>>
+	 */
+	public const STATUS_GROUPS = array(
+		'needs_review' => array(
+			self::STATUS_BLOCKED,
+			self::STATUS_TIMEOUT,
+			self::STATUS_ERROR,
+		),
+	);
+
+	/**
+	 * Get the display group a status belongs to.
+	 *
+	 * @since 1.2.0
+	 * @param string $status Status slug.
+	 * @return string Group key, or the status itself when it stands alone.
+	 */
+	public static function group_for( string $status ): string {
+		foreach ( self::STATUS_GROUPS as $group => $statuses ) {
+			if ( in_array( $status, $statuses, true ) ) {
+				return $group;
+			}
+		}
+
+		return $status;
+	}
+
+	/**
+	 * Human-readable label for a status.
+	 *
+	 * Single source for these strings so the dashboard cards, the Reports
+	 * filter tabs, the list table column and the CSV cannot drift apart.
+	 *
+	 * @since 1.2.0
+	 * @param string $status Status slug.
+	 * @return string Translated label.
+	 */
+	public static function label_for( string $status ): string {
+		$labels = array(
+			self::STATUS_PENDING  => __( 'Pending', 'yoko-link-checker' ),
+			self::STATUS_VALID    => __( 'Valid', 'yoko-link-checker' ),
+			self::STATUS_REDIRECT => __( 'Redirect', 'yoko-link-checker' ),
+			self::STATUS_BROKEN   => __( 'Broken', 'yoko-link-checker' ),
+			self::STATUS_WARNING  => __( 'Warning', 'yoko-link-checker' ),
+			self::STATUS_BLOCKED  => __( 'Blocked', 'yoko-link-checker' ),
+			self::STATUS_TIMEOUT  => __( 'Timeout', 'yoko-link-checker' ),
+			self::STATUS_ERROR    => __( 'Error', 'yoko-link-checker' ),
+		);
+
+		return $labels[ $status ] ?? $status;
+	}
+
+	/**
 	 * URL ID.
 	 *
 	 * @var int|null

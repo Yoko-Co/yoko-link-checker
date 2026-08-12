@@ -7,6 +7,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-12
+
+Monthly maintenance: relocates the admin screen, reconciles the broken-link
+counts that disagreed between screens, and hardens the link checker's outbound
+requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
+
+### Changed
+- **The admin UI now says "Yoko Link Checker" everywhere**, not "Link Checker" —
+  the menu entry, all three page headings, the Settings permission notice and the
+  outbound User-Agent. The short name left it unclear who owns the tool.
+- **Admin screen moved from a top-level menu to Tools → Yoko Link Checker.** Dashboard,
+  Reports and Settings are now tabs on a single screen rather than three menu
+  entries. All internal links build their URLs through `AdminController::page_url()`,
+  so the screen can be relocated again from one constant.
+- **Every count now comes from one place.** New `LinkQuery`, `StatusCounts` and
+  `LinkStats` replace four independent counters that used two different units and
+  three different filter sets. The dashboard, the Reports tabs, the "N items"
+  total and the CSV are all derived from the same queries.
+- **Both units are now labelled everywhere.** Unique URLs (the problem count — a
+  URL is fixed once) and link occurrences (the work count — one per place to
+  edit) are stated side by side, e.g. "12 broken URLs across 34 links". These
+  numbers were always different; the UI previously showed one and implied the other.
+- Ignoring is per-URL in the data model, and the UI now says so: the row action
+  reads "Ignore this URL" and there is an explicit Ignored view.
+- Blocked, timeout and error links appear in a **Needs Review** dashboard card
+  rather than being counted in the total and rendered nowhere.
+- CSV export honours the filters on screen, is named after its contents, and its
+  first column is "URL" rather than "Broken URL" (it never contained only broken URLs).
+- `Requires at least` documented alongside a new `Tested up to: 7.0` header.
+
+### Fixed
+- **"Last scan" reported the wrong time on every site not set to UTC.** Datetimes
+  are stored with `current_time( 'mysql' )` (site-local) but were read back with a
+  bare `strtotime()`, which parses as UTC — adding the site's UTC offset to every
+  age. On a UTC-4 site a scan that had just finished read "4 hours ago", and one
+  from yesterday read 28 hours. Scan *duration* was unaffected, because
+  subtracting two equally wrong timestamps cancels the error, which is why it
+  looked correct next to a wrong figure. All reads now go through
+  `Util\StoredTime`; the same bug affected "Last Checked" in the Reports table and
+  on the dashboard.
+- **A just-started scan could be killed as stale.** The same misreading was applied
+  to `started_at` in the 30-minute staleness check, so on a UTC-4 site a healthy
+  scan looked 4 hours idle whenever the last-activity option had not been written yet.
+- **Search no longer breaks pagination.** The count query ignored the search term
+  while the row query applied it, so searching advertised pages that rendered empty.
+- **The 'error' status is reachable.** It was counted in the dashboard total but
+  missing from the Reports filters; `?status=error` silently fell back to Broken.
+- **Dashboard cards now sum to the total.** Blocked, timeout and error were in the
+  total but had no card.
+- **Ignoring a link no longer desynchronises the screens.** The dashboard ignored
+  the ignored flag entirely, so its numbers never moved when Reports' did.
+- Scan progress can reach 100%: the denominator counted ignored URLs the checker
+  never fetches, and the completed-state branch was unreachable because the phase
+  check preceded it.
+- CSV export populated Source URL and Source Title only for the `post` type,
+  leaving them blank for pages and every custom post type.
+- "Recent Broken Links" excluded ignored URLs, picks its source post
+  deterministically, and reports how many places each URL appears.
+- Link rows are pruned when their source post is permanently deleted
+  (`before_delete_post`) and when links are removed from a post's content
+  (during rescan), so occurrence counts stop drifting above URL counts.
+- **Scheduled events are now always cleared on uninstall**, even when scan data is
+  kept. The routine previously returned early in that case, leaving cron events
+  firing forever with no handler once the plugin was deleted.
+- Uninstall removes capabilities only from `administrator`, the role `Activator`
+  grants them to; it also tried to remove them from `editor`, which never had them.
+
+### Security
+- **Redirects are validated at every hop.** The SSRF check previously ran once
+  against the original URL while the transport followed up to three redirects
+  unchecked, so an external URL redirecting to `169.254.169.254` or `127.0.0.1`
+  was fetched. Redirects are now followed manually with the full check on each hop.
+  This is the same class of issue WordPress fixed in core's URL validation in 7.0.3;
+  the plugin did not inherit that fix because it bypassed `wp_http_validate_url()`.
+- `reject_unsafe_urls` is now set, so core's hardened validator applies as a second layer.
+- **DNS resolution failure now blocks instead of allowing.** An unresolvable host
+  was treated as safe.
+- **Bracketed IPv6 literals are handled.** `http://[::1]/` bypassed the check
+  entirely: it failed IP validation with brackets, passed through `gethostbyname()`
+  unchanged, and was read as a resolution failure.
+- Schemes are allow-listed to http and https, closing `file://`, `gopher://` and `dict://`.
+- The DNS cache is time-limited rather than living for the whole process, narrowing
+  the DNS-rebinding window.
+- The parallel checking path no longer follows redirects without validation.
+- The internal-URL fallback no longer uses a second, weaker HTTP path with SSL
+  verification disabled; it goes through `HttpClient` with a scoped exemption for
+  the site's own host.
+- The User-Agent advertised `https://example.com`; it now identifies the real site.
+- **Every AJAX endpoint has its own nonce.** All ten shared a single
+  `yoko_lc_admin` nonce, so a token leaked from any plugin page — via a referrer,
+  or anything able to read the localized script object — authorised `clear_data`,
+  which truncates all three tables, exactly as readily as a status poll.
+- **`clear_data` now requires `manage_options`** rather than the scan-management
+  capability. Being able to run a scan is not the same as being able to destroy
+  its history.
+- **Status polling can no longer be used to spawn cron on demand.** The endpoint
+  needs only view capability but called `spawn_cron()` on every poll; it is now
+  rate-limited to once every 30 seconds.
+- **Settings saving uses Post/Redirect/Get.** The save ran during page render, so
+  the POST stayed in browser history and a refresh silently re-submitted it —
+  including the cron reschedule.
+- **Saved post types are validated against registered post types**, not just
+  sanitized, so arbitrary slugs can no longer be stored.
+
+### Added
+- **WP-CLI commands**: `wp yoko-lc counts`, `wp yoko-lc verify`, `wp yoko-lc prune`
+  and `wp yoko-lc export`. `verify` asserts the counts are internally consistent and
+  exits non-zero when they are not — it is the acceptance test for this release.
+- **An uninstall data-retention setting.** `uninstall.php` has always read
+  `yoko_lc_remove_data_on_uninstall` and defaulted to deleting everything, but
+  nothing ever wrote it — there was no way to opt out. The Settings tab now has
+  the checkbox.
+- Per-status counts on the Reports filter tabs, and a rows-per-page screen option.
+
+### Removed
+- **The `yoko_lc_internal_http_args` filter.** Internal URL checks ran through a
+  separate HTTP path with their own arguments and SSL verification disabled; they
+  now go through the same client as every other request, so there is one SSRF gate
+  rather than two. Use `yoko_lc_http_request_args` instead, plus
+  `yoko_lc_allow_private_urls` where a private address must be reachable.
+
+### Upgrade notes
+- **Anyone with a plugin page open across the upgrade will see one "Security check
+  failed"** on their next action, because the page holds nonces in the old format.
+  Reloading fixes it. Unavoidable when nonce actions change.
+- **The localized `ylcAdmin.nonce` value is now `ylcAdmin.nonces`, keyed by action.**
+  Nothing in the plugin relies on the old key, but bespoke integrations would.
+- **Bookmarks to the old admin URLs stop working.** The screen moved from
+  `admin.php?page=yoko-link-checker*` to `tools.php?page=yoko-link-checker&tab=…`.
+  The menu slug itself is unchanged, so stored data and capabilities are unaffected.
+- **Running a scan deletes stale and orphaned link rows** (and `wp yoko-lc prune`
+  does so explicitly). This is the intended fix for counts drifting upward, but it
+  is not undone by reverting the code — snapshot the database first if that matters.
+
 ## [1.1.1] - 2026-03-04
 
 Resolves 17 code review findings from Round 4 codebase review (Wave 4).
