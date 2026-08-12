@@ -219,6 +219,9 @@ final class ScanRepository {
 		$scan->status       = Scan::STATUS_COMPLETED;
 		$scan->completed_at = current_time( 'mysql' );
 
+		// The scan is what changed the numbers; drop the cached counts.
+		LinkStats::flush();
+
 		return $this->update( $scan );
 	}
 

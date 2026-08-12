@@ -305,6 +305,8 @@ final class LinkRepository {
 	public function delete_by_source( int $source_id, ?string $source_type = null ): int {
 		global $wpdb;
 
+		LinkStats::flush();
+
 		$sql    = "DELETE FROM {$this->table} WHERE source_id = %d";
 		$params = array( $source_id );
 
@@ -363,6 +365,8 @@ final class LinkRepository {
 	 */
 	public function delete_orphans(): int {
 		global $wpdb;
+
+		LinkStats::flush();
 
 		// phpcs:disable WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table name derives from $wpdb->prefix.

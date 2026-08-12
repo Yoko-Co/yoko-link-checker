@@ -57,6 +57,19 @@ final class LinkStats {
 	private array $memo = array();
 
 	/**
+	 * Transient holding the dashboard's unfiltered counts.
+	 */
+	private const CACHE_KEY = 'yoko_lc_status_counts';
+
+	/**
+	 * How long the cached dashboard counts survive without an explicit flush.
+	 *
+	 * A backstop, not the mechanism: every seam that changes the numbers calls
+	 * flush(). The TTL only covers a write path nobody remembered to wire up.
+	 */
+	private const CACHE_TTL = 300;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.2.0
@@ -116,6 +129,25 @@ final class LinkStats {
 			return $this->memo[ $key ];
 		}
 
+		// The unfiltered case is the dashboard's, and it is identical on every
+		// load. It is also the most expensive shape here -- a full join of the
+		// links table with COUNT(DISTINCT) on top -- where the query it replaced
+		// was an index-only scan of the much smaller urls table. On a site with
+		// millions of link rows that difference is felt on every page load, so
+		// this one result is cached, with every seam that changes the numbers
+		// calling flush() rather than waiting for a TTL to lapse.
+		$is_dashboard_query = '' === $query->search && ! $query->ignored_only;
+
+		if ( $is_dashboard_query ) {
+			$cached = get_transient( self::CACHE_KEY );
+
+			if ( is_array( $cached ) ) {
+				$this->memo[ $key ] = new StatusCounts( $cached['urls'], $cached['links'] );
+
+				return $this->memo[ $key ];
+			}
+		}
+
 		list( $where, $params ) = $query->to_where( $wpdb );
 
 		// phpcs:disable WordPress.DB.PreparedSQL.InterpolatedNotPrepared -- Table names derive from $wpdb->prefix.
@@ -133,7 +165,27 @@ final class LinkStats {
 
 		$this->memo[ $key ] = StatusCounts::from_rows( $rows ? $rows : array() );
 
+		if ( $is_dashboard_query ) {
+			set_transient( self::CACHE_KEY, $this->memo[ $key ]->to_array(), self::CACHE_TTL );
+		}
+
 		return $this->memo[ $key ];
+	}
+
+	/**
+	 * Discard the cached dashboard counts.
+	 *
+	 * Called from every seam that changes what the counts would say, so an
+	 * ignore, a rescan or a prune is reflected on the very next page load rather
+	 * than whenever a TTL happens to lapse.
+	 *
+	 * DEBUG: wp transient delete yoko_lc_status_counts does the same by hand.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public static function flush(): void {
+		delete_transient( self::CACHE_KEY );
 	}
 
 	/**

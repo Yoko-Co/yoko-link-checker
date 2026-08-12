@@ -121,6 +121,23 @@ requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
   the checkbox.
 - Per-status counts on the Reports filter tabs, and a rows-per-page screen option.
 
+### Performance
+- **Redirects are followed in parallel rounds, not one URL at a time.** The SSRF
+  fix initially pulled every redirecting URL out of its batch and re-checked it
+  sequentially. On sites where http→https or trailing-slash canonicalisation is
+  common — which is most large sites — that would have serialised a large share of
+  the checking phase, the exact stall this plugin exists to avoid. Each round now
+  validates and follows every redirect target together, so a batch costs one round
+  per hop depth rather than one request per redirecting link. Several links
+  redirecting to the same canonical URL fetch that URL once.
+- **The dashboard's counts are cached, with explicit invalidation.** Reconciling
+  the counts meant joining the links table where the old query was an index-only
+  scan of the smaller urls table — cheap on a small site, not on one with millions
+  of link rows. The unfiltered dashboard figures are cached and flushed by every
+  seam that changes them (scan completion, ignore/un-ignore, prune, clear data),
+  so nothing goes stale waiting for a TTL. Filtered and searched counts on the
+  Reports tab are always live.
+
 ### Removed
 - **The `yoko_lc_internal_http_args` filter.** Internal URL checks ran through a
   separate HTTP path with their own arguments and SSL verification disabled; they
