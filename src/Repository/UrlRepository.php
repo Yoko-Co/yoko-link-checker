@@ -404,6 +404,9 @@ final class UrlRepository {
 	public function mark_ignored( int $id, ?string $reason = null ): bool {
 		global $wpdb;
 
+		// Ignored URLs drop out of every count, so the cached figures are now wrong.
+		LinkStats::flush();
+
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 		$result = $wpdb->update(
 			$this->table,
@@ -428,6 +431,8 @@ final class UrlRepository {
 	 */
 	public function unmark_ignored( int $id ): bool {
 		global $wpdb;
+
+		LinkStats::flush();
 
 		// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 		$result = $wpdb->update(

@@ -584,6 +584,9 @@ class AjaxHandler {
 		// Clear any scheduled cron events.
 		wp_clear_scheduled_hook( 'yoko_lc_process_scan_batch' );
 
+		// The tables are empty; the cached dashboard counts are not.
+		LinkStats::flush();
+
 		wp_send_json_success(
 			array(
 				'message' => __( 'All scan data has been cleared.', 'yoko-link-checker' ),

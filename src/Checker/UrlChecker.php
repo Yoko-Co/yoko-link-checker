@@ -375,6 +375,33 @@ final class UrlChecker {
 	 * @return array<string, CheckResult>|false Results keyed by URL, or false on failure.
 	 */
 	private function send_parallel_requests( array $urls, string $method = 'HEAD' ) {
+		// Key each request by the URL we started from, so redirect hops can be
+		// followed in further parallel rounds and still be reported against the
+		// URL that actually appears in someone's content.
+		return $this->send_parallel_round( array_combine( $urls, $urls ), $method, 0 );
+	}
+
+	/**
+	 * Run one parallel round, then follow any redirects in another parallel round.
+	 *
+	 * Redirects are not delegated to the transport, because it would follow them
+	 * without re-running the SSRF gate. They are also not re-checked one at a
+	 * time: on a large site a serialised redirect path is exactly the stall this
+	 * plugin exists to avoid, and http->https or trailing-slash canonicalisation
+	 * makes redirects common rather than rare. Instead every redirect target in
+	 * the batch is validated and then fetched together in the next round, so the
+	 * batch costs one round per hop depth, not one request per redirecting URL.
+	 *
+	 * DEBUG: with WP_DEBUG on, each round logs its size and hop number --
+	 * grep debug.log for "parallel round".
+	 *
+	 * @since 1.2.0
+	 * @param array<string, string> $url_map Current URL => the URL it originated from.
+	 * @param string                $method  HTTP method.
+	 * @param int                   $hop     How many redirects have been followed already.
+	 * @return array<string, CheckResult>|false Results keyed by origin URL, or false on failure.
+	 */
+	private function send_parallel_round( array $url_map, string $method, int $hop ) {
 		$requests_class = null;
 
 		if ( class_exists( '\WpOrg\Requests\Requests' ) ) {
@@ -411,7 +438,18 @@ final class UrlChecker {
 		$requests     = array();
 		$ssrf_blocked = array();
 		$start_time   = microtime( true );
+		$urls         = array_keys( $url_map );
 
+		Logger::debug(
+			'parallel round',
+			array(
+				'hop'  => $hop,
+				'urls' => count( $urls ),
+			)
+		);
+
+		// Every URL is validated in the round that is about to fetch it, so a
+		// redirect target gets the same gate as the URL a user actually wrote.
 		foreach ( $urls as $url ) {
 			$ssrf_error = $this->http_client->validate_url_ssrf( $url );
 
@@ -447,15 +485,17 @@ final class UrlChecker {
 
 		// Add SSRF-blocked URLs to results.
 		foreach ( $ssrf_blocked as $url => $ssrf_error ) {
+			$origin = $url_map[ $url ];
+
 			$status = $this->classifier->classify(
 				null,
 				'ssrf_blocked',
 				$ssrf_error->get_error_message(),
-				$url
+				$origin
 			);
 
-			$results[ $url ] = CheckResult::error(
-				$url,
+			$results[ $origin ] = CheckResult::error(
+				$origin,
 				$status,
 				'ssrf_blocked',
 				$ssrf_error->get_error_message(),
@@ -464,15 +504,23 @@ final class UrlChecker {
 			);
 		}
 
+		// Redirect targets to fetch in the next round, as target => [origins].
+		// A list, not a single origin: two different links very often redirect to
+		// the same canonical URL, and keying 1:1 would silently drop one of them.
+		$next_round    = array();
+		$max_redirects = (int) ( $wp_args['redirection'] ?? 3 );
+
 		foreach ( $urls as $url ) {
+			$origin = $url_map[ $url ];
+
 			// Skip URLs already handled by SSRF check.
 			if ( isset( $ssrf_blocked[ $url ] ) ) {
 				continue;
 			}
 
 			if ( ! isset( $responses[ $url ] ) ) {
-				$results[ $url ] = CheckResult::error(
-					$url,
+				$results[ $origin ] = CheckResult::error(
+					$origin,
 					'broken',
 					'parallel_request_failed',
 					__( 'No response received from parallel request.', 'yoko-link-checker' ),
@@ -488,10 +536,10 @@ final class UrlChecker {
 				$error_message = $response->getMessage();
 				$error_type    = HttpClient::classify_error( $error_message );
 
-				$status = $this->classifier->classify( null, $error_type, $error_message, $url );
+				$status = $this->classifier->classify( null, $error_type, $error_message, $origin );
 
-				$results[ $url ] = CheckResult::error(
-					$url,
+				$results[ $origin ] = CheckResult::error(
+					$origin,
 					$status,
 					$error_type,
 					$error_message,
@@ -503,23 +551,42 @@ final class UrlChecker {
 
 			$http_code = (int) $response->status_code;
 
-			// A redirect needs each hop validated, which only the sequential path
-			// does. Costs one extra request per redirecting URL; redirects are a
-			// minority of links and correctness here is not optional.
+			// Queue the redirect target for the next parallel round rather than
+			// re-checking this URL on its own. The Location header is already in
+			// hand, so following it costs no extra request -- and the whole batch
+			// advances together instead of dropping into serial requests.
 			if ( $http_code >= 300 && $http_code < 400 ) {
-				Logger::debug( 'Redirect seen in parallel batch, re-checking with per-hop validation', array( 'url' => $url ) );
-				$results[ $url ] = $this->check( $url );
+				$location = $this->extract_location( $response, $url );
+
+				if ( null !== $location && $hop < $max_redirects ) {
+					$next_round[ $location ][] = $origin;
+					continue;
+				}
+
+				// Either no usable Location, or we have run out of hops. Report
+				// what we saw rather than pretending the chain resolved.
+				$results[ $origin ] = new CheckResult(
+					$origin,
+					$this->classifier->classify( $http_code, null, null, $origin, $location ?? $url ),
+					$http_code,
+					$location,
+					$hop,
+					$time_per_url,
+					null,
+					null,
+					array()
+				);
 				continue;
 			}
 
 			$final_url = $url;
-			$redirects = 0;
+			$redirects = $hop;
 
 			if ( ! empty( $response->url ) && $response->url !== $url ) {
 				$final_url = $response->url;
 			}
 
-			$status = $this->classifier->classify( $http_code, null, null, $url, $final_url );
+			$status = $this->classifier->classify( $http_code, null, null, $origin, $final_url );
 
 			$response_headers = array();
 			if ( is_array( $response->headers ) ) {
@@ -528,11 +595,11 @@ final class UrlChecker {
 				$response_headers = $response->headers->getAll();
 			}
 
-			$results[ $url ] = new CheckResult(
-				$url,
+			$results[ $origin ] = new CheckResult(
+				$origin,
 				$status,
 				$http_code,
-				$final_url !== $url ? $final_url : null,
+				$final_url !== $origin ? $final_url : null,
 				$redirects,
 				$time_per_url,
 				null,
@@ -541,6 +608,76 @@ final class UrlChecker {
 			);
 		}
 
+		// Follow every redirect in this batch together, one more parallel round.
+		if ( ! empty( $next_round ) ) {
+			// One request per distinct target; the result is then reported against
+			// each origin that led there.
+			$lead_origins = array();
+			foreach ( $next_round as $target => $origins ) {
+				$lead_origins[ $target ] = $origins[0];
+			}
+
+			$followed = $this->send_parallel_round( $lead_origins, $method, $hop + 1 );
+
+			foreach ( $next_round as $target => $origins ) {
+				$lead = $origins[0];
+
+				foreach ( $origins as $origin_url ) {
+					if ( is_array( $followed ) && isset( $followed[ $lead ] ) ) {
+						$results[ $origin_url ] = $followed[ $lead ]->with_url( $origin_url );
+						continue;
+					}
+
+					// The follow-up round could not run; report the redirect we saw
+					// rather than silently dropping these URLs from the batch.
+					$results[ $origin_url ] = new CheckResult(
+						$origin_url,
+						Url::STATUS_REDIRECT,
+						301,
+						$target,
+						$hop + 1,
+						$time_per_url,
+						null,
+						null,
+						array()
+					);
+				}
+			}
+		}
+
 		return $results;
+	}
+
+	/**
+	 * Get the absolute redirect target from a parallel response.
+	 *
+	 * @since 1.2.0
+	 * @param object $response Requests response object.
+	 * @param string $base_url URL the response came from.
+	 * @return string|null Absolute target, or null when there isn't a usable one.
+	 */
+	private function extract_location( $response, string $base_url ): ?string {
+		$headers = array();
+
+		if ( is_array( $response->headers ) ) {
+			$headers = $response->headers;
+		} elseif ( is_object( $response->headers ) && method_exists( $response->headers, 'getAll' ) ) {
+			$headers = $response->headers->getAll();
+		}
+
+		$location = $headers['location'] ?? $headers['Location'] ?? '';
+
+		if ( is_array( $location ) ) {
+			$location = end( $location );
+		}
+
+		if ( '' === (string) $location ) {
+			return null;
+		}
+
+		// Location is often relative; resolve before it is validated and fetched.
+		$absolute = \WP_Http::make_absolute_url( (string) $location, $base_url );
+
+		return '' === $absolute ? null : $absolute;
 	}
 }

@@ -121,6 +121,31 @@ final class CheckResult {
 	}
 
 	/**
+	 * Copy this result, reported against a different URL.
+	 *
+	 * When several links redirect to the same target, that target is fetched
+	 * once and its verdict reported against each link that led there -- so the
+	 * batch pays for one request, not one per link.
+	 *
+	 * @since 1.2.0
+	 * @param string $url URL to report the result against.
+	 * @return self
+	 */
+	public function with_url( string $url ): self {
+		return new self(
+			$url,
+			$this->status,
+			$this->http_code,
+			$this->final_url,
+			$this->redirect_count,
+			$this->response_time,
+			$this->error_type,
+			$this->error_message,
+			$this->headers
+		);
+	}
+
+	/**
 	 * Create an error result.
 	 *
 	 * @since 1.0.0

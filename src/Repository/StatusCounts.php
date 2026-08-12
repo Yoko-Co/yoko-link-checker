@@ -75,6 +75,19 @@ final class StatusCounts {
 	}
 
 	/**
+	 * Flatten to plain arrays, for caching.
+	 *
+	 * @since 1.2.0
+	 * @return array{urls: array<string, int>, links: array<string, int>}
+	 */
+	public function to_array(): array {
+		return array(
+			'urls'  => $this->urls,
+			'links' => $this->links,
+		);
+	}
+
+	/**
 	 * Unique URLs with the given status.
 	 *
 	 * @since 1.2.0
