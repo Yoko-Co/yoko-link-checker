@@ -350,8 +350,10 @@ class ScanOrchestrator {
 	 * @return void
 	 */
 	private function transition_to_checking( int $scan_id ): void {
-		// Count only pending URLs to check (exclude already-checked URLs from previous scans).
-		$total_urls = $this->url_repository->count( \YokoLinkChecker\Model\Url::STATUS_PENDING );
+		// Count only the URLs the checker will actually fetch: pending, and not
+		// ignored. Counting ignored ones too left them permanently in the
+		// denominator and never in the numerator, so the bar stalled short of 100%.
+		$total_urls = $this->url_repository->count_pending_checkable();
 
 		$this->scan_repository->update_phase( $scan_id, Scan::PHASE_CHECKING );
 
@@ -664,7 +666,12 @@ class ScanOrchestrator {
 		$total    = 0;
 		$done     = 0;
 
-		if ( Scan::PHASE_DISCOVERY === $scan->current_phase ) {
+		// Completed is checked first on purpose. complete() leaves current_phase
+		// at 'checking', so testing the phase first made this branch unreachable
+		// and a finished scan reported checking-phase math forever.
+		if ( Scan::STATUS_COMPLETED === $scan->status ) {
+			$progress = 100.0;
+		} elseif ( Scan::PHASE_DISCOVERY === $scan->current_phase ) {
 			$total    = $scan->total_posts;
 			$done     = $scan->processed_posts;
 			$progress = $total > 0 ? min( ( $done / $total ) * 50.0, 50.0 ) : 0.0;
@@ -672,9 +679,9 @@ class ScanOrchestrator {
 			$done     = $scan->checked_urls;
 			$total    = $scan->total_urls;
 			$progress = 50.0 + ( $total > 0 ? min( ( $done / $total ) * 50.0, 50.0 ) : 0.0 );
-		} elseif ( Scan::STATUS_COMPLETED === $scan->status ) {
-			$progress = 100.0;
 		}
+
+		$progress = max( 0.0, min( 100.0, $progress ) );
 
 		return array(
 			'scan_id'      => $scan->id,

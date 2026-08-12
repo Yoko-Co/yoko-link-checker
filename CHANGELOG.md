@@ -7,6 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-12
+
+Monthly maintenance: relocates the admin screen, reconciles the broken-link
+counts that disagreed between screens, and hardens the link checker's outbound
+requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
+
+### Changed
+- **Admin screen moved from a top-level menu to Tools → Link Checker.** Dashboard,
+  Reports and Settings are now tabs on a single screen rather than three menu
+  entries. All internal links build their URLs through `AdminController::page_url()`,
+  so the screen can be relocated again from one constant.
+- **Every count now comes from one place.** New `LinkQuery`, `StatusCounts` and
+  `LinkStats` replace four independent counters that used two different units and
+  three different filter sets. The dashboard, the Reports tabs, the "N items"
+  total and the CSV are all derived from the same queries.
+- **Both units are now labelled everywhere.** Unique URLs (the problem count — a
+  URL is fixed once) and link occurrences (the work count — one per place to
+  edit) are stated side by side, e.g. "12 broken URLs across 34 links". These
+  numbers were always different; the UI previously showed one and implied the other.
+- Ignoring is per-URL in the data model, and the UI now says so: the row action
+  reads "Ignore this URL" and there is an explicit Ignored view.
+- Blocked, timeout and error links appear in a **Needs Review** dashboard card
+  rather than being counted in the total and rendered nowhere.
+- CSV export honours the filters on screen, is named after its contents, and its
+  first column is "URL" rather than "Broken URL" (it never contained only broken URLs).
+- `Requires at least` documented alongside a new `Tested up to: 7.0` header.
+
+### Fixed
+- **Search no longer breaks pagination.** The count query ignored the search term
+  while the row query applied it, so searching advertised pages that rendered empty.
+- **The 'error' status is reachable.** It was counted in the dashboard total but
+  missing from the Reports filters; `?status=error` silently fell back to Broken.
+- **Dashboard cards now sum to the total.** Blocked, timeout and error were in the
+  total but had no card.
+- **Ignoring a link no longer desynchronises the screens.** The dashboard ignored
+  the ignored flag entirely, so its numbers never moved when Reports' did.
+- Scan progress can reach 100%: the denominator counted ignored URLs the checker
+  never fetches, and the completed-state branch was unreachable because the phase
+  check preceded it.
+- CSV export populated Source URL and Source Title only for the `post` type,
+  leaving them blank for pages and every custom post type.
+- "Recent Broken Links" excluded ignored URLs, picks its source post
+  deterministically, and reports how many places each URL appears.
+- Link rows are pruned when their source post is permanently deleted
+  (`before_delete_post`) and when links are removed from a post's content
+  (during rescan), so occurrence counts stop drifting above URL counts.
+
+### Security
+- **Redirects are validated at every hop.** The SSRF check previously ran once
+  against the original URL while the transport followed up to three redirects
+  unchecked, so an external URL redirecting to `169.254.169.254` or `127.0.0.1`
+  was fetched. Redirects are now followed manually with the full check on each hop.
+  This is the same class of issue WordPress fixed in core's URL validation in 7.0.3;
+  the plugin did not inherit that fix because it bypassed `wp_http_validate_url()`.
+- `reject_unsafe_urls` is now set, so core's hardened validator applies as a second layer.
+- **DNS resolution failure now blocks instead of allowing.** An unresolvable host
+  was treated as safe.
+- **Bracketed IPv6 literals are handled.** `http://[::1]/` bypassed the check
+  entirely: it failed IP validation with brackets, passed through `gethostbyname()`
+  unchanged, and was read as a resolution failure.
+- Schemes are allow-listed to http and https, closing `file://`, `gopher://` and `dict://`.
+- The DNS cache is time-limited rather than living for the whole process, narrowing
+  the DNS-rebinding window.
+- The parallel checking path no longer follows redirects without validation.
+- The internal-URL fallback no longer uses a second, weaker HTTP path with SSL
+  verification disabled; it goes through `HttpClient` with a scoped exemption for
+  the site's own host.
+- The User-Agent advertised `https://example.com`; it now identifies the real site.
+
+### Added
+- **WP-CLI commands**: `wp yoko-lc counts`, `wp yoko-lc verify`, `wp yoko-lc prune`
+  and `wp yoko-lc export`. `verify` asserts the counts are internally consistent and
+  exits non-zero when they are not — it is the acceptance test for this release.
+- Per-status counts on the Reports filter tabs, and a rows-per-page screen option.
+
 ## [1.1.1] - 2026-03-04
 
 Resolves 17 code review findings from Round 4 codebase review (Wave 4).

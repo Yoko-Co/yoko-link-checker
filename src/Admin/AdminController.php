@@ -2,7 +2,9 @@
 /**
  * Admin Controller class.
  *
- * Handles admin menu registration and page routing.
+ * Owns the plugin's single admin screen: registers it under Tools, routes the
+ * ?tab= parameter to the right page object, and builds every URL that points
+ * back at the screen so no other file has to know where the plugin lives.
  *
  * @package YokoLinkChecker
  * @since   1.0.0
@@ -25,6 +27,35 @@ class AdminController {
 	 * Menu slug.
 	 */
 	public const MENU_SLUG = 'yoko-link-checker';
+
+	/**
+	 * Parent menu file the plugin screen hangs from.
+	 *
+	 * @since 1.2.0
+	 */
+	public const PARENT_SLUG = 'tools.php';
+
+	/**
+	 * Tab slugs, in the order they appear in the nav.
+	 *
+	 * @since 1.2.0
+	 * @var array<string>
+	 */
+	public const TABS = array( 'dashboard', 'reports', 'settings' );
+
+	/**
+	 * Capability required to view the screen at all.
+	 *
+	 * @since 1.2.0
+	 */
+	public const VIEW_CAP = 'yoko_lc_view_results';
+
+	/**
+	 * Capability required for the Settings tab.
+	 *
+	 * @since 1.2.0
+	 */
+	public const SETTINGS_CAP = 'yoko_lc_manage_settings';
 
 	/**
 	 * Dashboard page instance.
@@ -72,83 +103,195 @@ class AdminController {
 	 * @return void
 	 */
 	public function register(): void {
+		// WP SEAM: admin_menu -- fires on every admin request after the user is known.
+		// Registers the plugin's single screen under Tools.
 		add_action( 'admin_menu', array( $this, 'register_menu' ) );
+
+		// WP SEAM: admin_enqueue_scripts -- fires per admin screen with the hook suffix.
 		add_action( 'admin_enqueue_scripts', array( $this, 'enqueue_assets' ) );
+
+		// WP SEAM: set_screen_option_{$option} -- core runs this during admin bootstrap,
+		// well before our screen's load hook, so it cannot be registered alongside
+		// add_screen_option(). Returning the value is what lets core persist it.
+		add_filter( 'set_screen_option_' . LinksListTable::PER_PAGE_OPTION, array( $this, 'save_per_page_option' ), 10, 3 );
 
 		// Register AJAX handlers.
 		$this->ajax_handler->register();
 	}
 
 	/**
-	 * Register admin menu.
+	 * Register the admin screen under Tools.
+	 *
+	 * One submenu entry, three tabs. Three sibling entries under Tools would
+	 * crowd a menu shared with core, so Dashboard/Reports/Settings are tabs on
+	 * a single page (the Site Health pattern) routed by ?tab=.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Moved from a top-level menu to Tools, with in-page tabs.
 	 * @return void
 	 */
 	public function register_menu(): void {
-		$view_cap     = 'yoko_lc_view_results';
-		$settings_cap = 'yoko_lc_manage_settings';
-
-		// Main menu page.
-		add_menu_page(
+		$hook = add_submenu_page(
+			self::PARENT_SLUG,
 			__( 'Link Checker', 'yoko-link-checker' ),
 			__( 'Link Checker', 'yoko-link-checker' ),
-			$view_cap,
+			self::VIEW_CAP,
 			self::MENU_SLUG,
-			array( $this->dashboard_page, 'render' ),
-			'dashicons-admin-links',
-			80
+			array( $this, 'render' )
 		);
 
-		// Dashboard submenu (same as main).
-		add_submenu_page(
-			self::MENU_SLUG,
-			__( 'Dashboard', 'yoko-link-checker' ),
-			__( 'Dashboard', 'yoko-link-checker' ),
-			$view_cap,
-			self::MENU_SLUG,
-			array( $this->dashboard_page, 'render' )
-		);
-
-		// Results submenu.
-		$results_hook = add_submenu_page(
-			self::MENU_SLUG,
-			__( 'Reports', 'yoko-link-checker' ),
-			__( 'Reports', 'yoko-link-checker' ),
-			$view_cap,
-			self::MENU_SLUG . '-results',
-			array( $this->results_page, 'render' )
-		);
-
-		// Handle CSV export early on results page load, before any output.
-		if ( $results_hook ) {
-			add_action( "load-{$results_hook}", array( $this, 'maybe_handle_export' ) );
+		// Everything that sends headers or persists a screen option has to run on
+		// the load hook, before the admin page starts writing output.
+		if ( $hook ) {
+			// WP SEAM: load-{$hook} -- fires only for this screen, before render.
+			add_action( "load-{$hook}", array( $this, 'maybe_handle_export' ) );
+			add_action( "load-{$hook}", array( $this, 'maybe_handle_reports_actions' ) );
 		}
-
-		// Settings submenu.
-		add_submenu_page(
-			self::MENU_SLUG,
-			__( 'Settings', 'yoko-link-checker' ),
-			__( 'Settings', 'yoko-link-checker' ),
-			$settings_cap,
-			self::MENU_SLUG . '-settings',
-			array( $this, 'render_settings' )
-		);
 	}
 
 	/**
-	 * Handle CSV export on the results page load hook.
+	 * Route the current request to the page object for the active tab.
 	 *
-	 * Fires only when the results page is loaded, not on every admin page.
+	 * Unknown tabs fall back to the dashboard, never to a privileged tab.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public function render(): void {
+		switch ( self::current_tab() ) {
+			case 'reports':
+				$this->results_page->render();
+				break;
+
+			case 'settings':
+				$this->render_settings();
+				break;
+
+			default:
+				$this->dashboard_page->render();
+				break;
+		}
+	}
+
+	/**
+	 * Get the active tab slug.
+	 *
+	 * @since 1.2.0
+	 * @return string One of self::TABS.
+	 */
+	public static function current_tab(): string {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only navigation parameter.
+		$tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'dashboard';
+
+		return in_array( $tab, self::TABS, true ) ? $tab : 'dashboard';
+	}
+
+	/**
+	 * Build a URL to one of the plugin's tabs.
+	 *
+	 * Every link that points back at this plugin goes through here, so the
+	 * screen can be moved again by changing PARENT_SLUG alone.
+	 *
+	 * @since 1.2.0
+	 * @param string               $tab   Tab slug.
+	 * @param array<string, mixed> $extra Extra query args (status, search, etc.).
+	 * @return string Escaped-on-output-ready URL.
+	 */
+	public static function page_url( string $tab = 'dashboard', array $extra = array() ): string {
+		$args = array_merge(
+			array(
+				'page' => self::MENU_SLUG,
+				'tab'  => in_array( $tab, self::TABS, true ) ? $tab : 'dashboard',
+			),
+			$extra
+		);
+
+		return add_query_arg( $args, admin_url( self::PARENT_SLUG ) );
+	}
+
+	/**
+	 * Tab labels, keyed by slug, filtered to what the current user may see.
+	 *
+	 * @since 1.2.0
+	 * @return array<string, string>
+	 */
+	public static function visible_tabs(): array {
+		$tabs = array(
+			'dashboard' => __( 'Dashboard', 'yoko-link-checker' ),
+			'reports'   => __( 'Reports', 'yoko-link-checker' ),
+			'settings'  => __( 'Settings', 'yoko-link-checker' ),
+		);
+
+		if ( ! self::can_manage_settings() ) {
+			unset( $tabs['settings'] );
+		}
+
+		return $tabs;
+	}
+
+	/**
+	 * Whether the current user may change plugin settings.
+	 *
+	 * The screen itself only requires VIEW_CAP now that all three tabs share one
+	 * menu entry, so the Settings tab has to check its own capability.
+	 *
+	 * @since 1.2.0
+	 * @return bool
+	 */
+	public static function can_manage_settings(): bool {
+		return current_user_can( self::SETTINGS_CAP ) || current_user_can( 'manage_options' );
+	}
+
+	/**
+	 * Handle CSV export on the screen's load hook.
+	 *
+	 * Runs before any output so handle_export() can send its own headers.
 	 *
 	 * @since 1.0.11
+	 * @since 1.2.0 Scoped to the Reports tab.
 	 * @return void
 	 */
 	public function maybe_handle_export(): void {
+		if ( 'reports' !== self::current_tab() ) {
+			return;
+		}
+
 		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Nonce verified in handle_export().
 		if ( isset( $_GET['action'] ) && 'export' === $_GET['action'] ) {
 			$this->results_page->handle_export();
 		}
+	}
+
+	/**
+	 * Run the Reports tab's load-time work: screen options and row actions.
+	 *
+	 * Both need to happen before output -- add_screen_option() so WordPress can
+	 * persist the choice, and the ignore/un-ignore actions so their redirect
+	 * isn't fighting headers that have already been sent.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public function maybe_handle_reports_actions(): void {
+		if ( 'reports' !== self::current_tab() ) {
+			return;
+		}
+
+		$this->results_page->register_screen_options();
+		$this->results_page->maybe_handle_actions();
+	}
+
+	/**
+	 * Persist the Reports table's rows-per-page screen option.
+	 *
+	 * @since 1.2.0
+	 * @param mixed  $status Value to save, or false to skip saving.
+	 * @param string $option Option name.
+	 * @param mixed  $value  Submitted value.
+	 * @return int Clamped rows per page.
+	 */
+	public function save_per_page_option( $status, string $option, $value ): int {
+		return min( 500, max( 1, absint( $value ) ) );
 	}
 
 	/**
@@ -230,9 +373,18 @@ class AdminController {
 	 * Render settings page.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Checks its own capability -- the shared menu entry only requires VIEW_CAP.
 	 * @return void
 	 */
 	public function render_settings(): void {
+		if ( ! self::can_manage_settings() ) {
+			wp_die(
+				esc_html__( 'You do not have permission to change Link Checker settings.', 'yoko-link-checker' ),
+				'',
+				array( 'response' => 403 )
+			);
+		}
+
 		// Handle form submission.
 		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in handle_settings_save().
 		if ( isset( $_POST['yoko_lc_settings_nonce'] ) ) {
@@ -257,7 +409,7 @@ class AdminController {
 			return;
 		}
 
-		if ( ! current_user_can( 'yoko_lc_manage_settings' ) && ! current_user_can( 'manage_options' ) ) {
+		if ( ! self::can_manage_settings() ) {
 			add_settings_error( 'yoko_lc_settings', 'permission_error', __( 'Permission denied.', 'yoko-link-checker' ) );
 			return;
 		}

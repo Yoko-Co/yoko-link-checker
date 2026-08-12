@@ -15,7 +15,11 @@ $yoko_lc_post_types = get_post_types( array( 'public' => true ), 'objects' );
 ?>
 
 <div class="wrap ylc-settings">
-	<h1><?php esc_html_e( 'Link Checker Settings', 'yoko-link-checker' ); ?></h1>
+	<h1><?php esc_html_e( 'Link Checker', 'yoko-link-checker' ); ?></h1>
+
+	<?php require YOKO_LC_PLUGIN_DIR . 'templates/admin/tab-nav.php'; ?>
+
+	<h2><?php esc_html_e( 'Settings', 'yoko-link-checker' ); ?></h2>
 
 	<?php settings_errors( 'yoko_lc_settings' ); ?>
 

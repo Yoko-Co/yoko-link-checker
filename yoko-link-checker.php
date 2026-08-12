@@ -3,8 +3,9 @@
  * Plugin Name:       Yoko Link Checker
  * Plugin URI:        https://github.com/Yoko-Co/yoko-link-checker
  * Description:       A performant, extensible broken link checker for WordPress. Scans content for links, checks their validity, and reports issues.
- * Version:           1.1.1
+ * Version:           1.2.0
  * Requires at least: 6.0
+ * Tested up to:      7.0
  * Requires PHP:      8.0
  * Author:            Yoko Co.
  * Author URI:        https://yokoco.com
@@ -24,7 +25,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 // Plugin constants.
-define( 'YOKO_LC_VERSION', '1.1.1' );
+define( 'YOKO_LC_VERSION', '1.2.0' );
 define( 'YOKO_LC_PLUGIN_FILE', __FILE__ );
 define( 'YOKO_LC_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );
 define( 'YOKO_LC_PLUGIN_URL', plugin_dir_url( __FILE__ ) );

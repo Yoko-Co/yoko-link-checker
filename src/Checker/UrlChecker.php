@@ -397,11 +397,14 @@ final class UrlChecker {
 			'Connection'      => 'close',
 		);
 
+		// Redirects are deliberately NOT followed here. The Requests library would
+		// follow them without re-running the SSRF gate, so an external URL that
+		// redirects to a private or link-local address would be fetched. Any 3xx
+		// seen below is re-checked through HttpClient, which validates every hop.
 		$options = array(
 			'timeout'          => $wp_args['timeout'] ?? 8,
 			'connect_timeout'  => $wp_args['connect_timeout'] ?? 5,
-			'follow_redirects' => true,
-			'redirects'        => $wp_args['redirection'] ?? 3,
+			'follow_redirects' => false,
 			'verify'           => $wp_args['sslverify'] ?? true,
 		);
 
@@ -499,12 +502,19 @@ final class UrlChecker {
 			}
 
 			$http_code = (int) $response->status_code;
+
+			// A redirect needs each hop validated, which only the sequential path
+			// does. Costs one extra request per redirecting URL; redirects are a
+			// minority of links and correctness here is not optional.
+			if ( $http_code >= 300 && $http_code < 400 ) {
+				Logger::debug( 'Redirect seen in parallel batch, re-checking with per-hop validation', array( 'url' => $url ) );
+				$results[ $url ] = $this->check( $url );
+				continue;
+			}
+
 			$final_url = $url;
 			$redirects = 0;
 
-			if ( ! empty( $response->history ) ) {
-				$redirects = count( $response->history );
-			}
 			if ( ! empty( $response->url ) && $response->url !== $url ) {
 				$final_url = $response->url;
 			}

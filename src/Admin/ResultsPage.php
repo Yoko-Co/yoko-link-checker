@@ -14,7 +14,9 @@ namespace YokoLinkChecker\Admin;
 
 defined( 'ABSPATH' ) || exit;
 
+use YokoLinkChecker\Repository\LinkQuery;
 use YokoLinkChecker\Repository\LinkRepository;
+use YokoLinkChecker\Repository\LinkStats;
 use YokoLinkChecker\Repository\UrlRepository;
 use YokoLinkChecker\Model\Url;
 
@@ -47,15 +49,95 @@ class ResultsPage {
 	private ?LinksListTable $list_table = null;
 
 	/**
+	 * Link statistics service.
+	 *
+	 * @var LinkStats
+	 */
+	private LinkStats $link_stats;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Takes the stats service.
 	 * @param LinkRepository $link_repository Link repository.
 	 * @param UrlRepository  $url_repository  URL repository.
+	 * @param LinkStats      $link_stats      Link statistics service.
 	 */
-	public function __construct( LinkRepository $link_repository, UrlRepository $url_repository ) {
+	public function __construct( LinkRepository $link_repository, UrlRepository $url_repository, LinkStats $link_stats ) {
 		$this->link_repository = $link_repository;
 		$this->url_repository  = $url_repository;
+		$this->link_stats      = $link_stats;
+	}
+
+	/**
+	 * Register the screen option for rows per page.
+	 *
+	 * Called from the screen's load hook, which is the only point early enough
+	 * for WordPress to persist the user's choice.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public function register_screen_options(): void {
+		add_screen_option(
+			'per_page',
+			array(
+				'label'   => __( 'Links per page', 'yoko-link-checker' ),
+				'default' => 20,
+				'option'  => LinksListTable::PER_PAGE_OPTION,
+			)
+		);
+	}
+
+	/**
+	 * Handle ignore/un-ignore before the admin page starts rendering.
+	 *
+	 * Runs on the screen's load hook so the redirect below happens before any
+	 * output. Doing this during render emitted a headers-already-sent warning
+	 * and left the action in the URL, so a refresh re-fired it.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public function maybe_handle_actions(): void {
+		// phpcs:disable WordPress.Security.NonceVerification.Recommended -- Nonce verified below.
+		if ( ! isset( $_GET['action'], $_GET['url_id'] ) ) {
+			return;
+		}
+
+		$action = sanitize_key( wp_unslash( $_GET['action'] ) );
+		$url_id = absint( $_GET['url_id'] );
+		// phpcs:enable
+
+		if ( ! in_array( $action, array( 'ignore', 'unignore' ), true ) ) {
+			return;
+		}
+
+		$nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
+
+		if ( ! wp_verify_nonce( $nonce, "yoko_lc_ignore_{$url_id}" ) ) {
+			wp_die( esc_html__( 'Security check failed.', 'yoko-link-checker' ), '', array( 'response' => 403 ) );
+		}
+
+		if ( ! current_user_can( 'yoko_lc_manage_scans' ) && ! current_user_can( 'manage_options' ) ) {
+			wp_die( esc_html__( 'Permission denied.', 'yoko-link-checker' ), '', array( 'response' => 403 ) );
+		}
+
+		$succeeded = 'ignore' === $action
+			? $this->url_repository->mark_ignored( $url_id )
+			: $this->url_repository->unmark_ignored( $url_id );
+
+		$redirect_url = remove_query_arg( array( 'action', 'url_id', '_wpnonce' ) );
+
+		if ( ! $succeeded ) {
+			// DEBUG: look for ylc_error in the URL, and check the URL row still exists:
+			// wp yoko-lc counts, or wp db query "SELECT * FROM wp_yoko_lc_urls WHERE id = <id>".
+			$redirect_url = add_query_arg( 'ylc_error', "{$action}_failed", $redirect_url );
+		}
+
+		wp_safe_redirect( $redirect_url );
+		exit;
 	}
 
 	/**
@@ -65,154 +147,28 @@ class ResultsPage {
 	 * @return void
 	 */
 	public function render(): void {
-		// Handle actions.
-		$this->handle_actions();
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Read-only view parameters; LinkQuery sanitizes.
+		$query = LinkQuery::from_request( wp_unslash( $_GET ), $this->get_per_page() );
 
-		// Get filter parameters.
-		$status_filter = $this->get_status_filter();
-		$filters       = $this->get_filters();
-
-		// Create list table.
-		$this->list_table = new LinksListTable( $this->link_repository );
-		$this->list_table->set_filter( $status_filter );
+		$this->list_table = new LinksListTable( $this->link_repository, $this->link_stats, $query );
 		$this->list_table->prepare_items();
+
+		// Used by the template for the hidden form field that preserves the filter.
+		$status_filter = $query->status ?? 'all';
 
 		include YOKO_LC_PLUGIN_DIR . 'templates/admin/results.php';
 	}
 
 	/**
-	 * Handle page actions.
+	 * Rows per page for the current user.
 	 *
-	 * @since 1.0.0
-	 * @return void
+	 * @since 1.2.0
+	 * @return int
 	 */
-	private function handle_actions(): void {
-		// Export is handled early via the load-{$hook} action in AdminController.
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Just checking the action parameter.
-		if ( isset( $_GET['action'] ) && 'export' === $_GET['action'] ) {
-			return;
-		}
+	private function get_per_page(): int {
+		$per_page = (int) get_user_option( LinksListTable::PER_PAGE_OPTION );
 
-		// Handle single actions.
-		if ( ! isset( $_GET['action'] ) || ! isset( $_GET['link_id'] ) ) {
-			return;
-		}
-
-		$action  = sanitize_key( $_GET['action'] );
-		$link_id = absint( $_GET['link_id'] );
-		$nonce   = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
-
-		if ( ! wp_verify_nonce( $nonce, "yoko_lc_action_{$link_id}" ) ) {
-			wp_die( esc_html__( 'Security check failed.', 'yoko-link-checker' ) );
-		}
-
-		if ( ! current_user_can( 'yoko_lc_manage_scans' ) && ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Permission denied.', 'yoko-link-checker' ) );
-		}
-
-		switch ( $action ) {
-			case 'ignore':
-				$this->ignore_link( $link_id );
-				break;
-
-			case 'unignore':
-				$this->unignore_link( $link_id );
-				break;
-		}
-
-		// Redirect to remove action from URL.
-		$redirect_url = remove_query_arg( array( 'action', 'link_id', '_wpnonce' ) );
-		wp_safe_redirect( $redirect_url );
-		exit;
-	}
-
-	/**
-	 * Get current status filter.
-	 *
-	 * @since 1.0.0
-	 * @return string
-	 */
-	private function get_status_filter(): string {
-		$valid_statuses = array(
-			'all',
-			Url::STATUS_BROKEN,
-			Url::STATUS_WARNING,
-			Url::STATUS_REDIRECT,
-			Url::STATUS_BLOCKED,
-			Url::STATUS_TIMEOUT,
-			Url::STATUS_PENDING,
-			Url::STATUS_VALID,
-		);
-
-		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Filter parameter doesn't require nonce.
-		$status = isset( $_GET['status'] ) ? sanitize_key( $_GET['status'] ) : 'broken';
-
-		return in_array( $status, $valid_statuses, true ) ? $status : 'broken';
-	}
-
-	/**
-	 * Get filter options for display.
-	 *
-	 * @since 1.0.0
-	 * @return array
-	 */
-	private function get_filters(): array {
-		return array(
-			'all'      => __( 'All', 'yoko-link-checker' ),
-			'broken'   => __( 'Broken', 'yoko-link-checker' ),
-			'warning'  => __( 'Warning', 'yoko-link-checker' ),
-			'redirect' => __( 'Redirect', 'yoko-link-checker' ),
-			'blocked'  => __( 'Blocked', 'yoko-link-checker' ),
-			'timeout'  => __( 'Timeout', 'yoko-link-checker' ),
-			'pending'  => __( 'Pending', 'yoko-link-checker' ),
-			'valid'    => __( 'Valid', 'yoko-link-checker' ),
-		);
-	}
-
-	/**
-	 * Ignore a link.
-	 *
-	 * @since 1.0.0
-	 * @param int $link_id Link ID.
-	 * @return void
-	 */
-	private function ignore_link( int $link_id ): void {
-		$link = $this->link_repository->find( $link_id );
-
-		if ( ! $link ) {
-			return;
-		}
-
-		$result = $this->url_repository->mark_ignored( $link->url_id );
-
-		if ( ! $result ) {
-			$redirect_url = remove_query_arg( array( 'action', 'link_id', '_wpnonce' ) );
-			wp_safe_redirect( add_query_arg( 'ylc_error', 'ignore_failed', $redirect_url ) );
-			exit;
-		}
-	}
-
-	/**
-	 * Unignore a link.
-	 *
-	 * @since 1.0.0
-	 * @param int $link_id Link ID.
-	 * @return void
-	 */
-	private function unignore_link( int $link_id ): void {
-		$link = $this->link_repository->find( $link_id );
-
-		if ( ! $link ) {
-			return;
-		}
-
-		$result = $this->url_repository->unmark_ignored( $link->url_id );
-
-		if ( ! $result ) {
-			$redirect_url = remove_query_arg( array( 'action', 'link_id', '_wpnonce' ) );
-			wp_safe_redirect( add_query_arg( 'ylc_error', 'unignore_failed', $redirect_url ) );
-			exit;
-		}
+		return $per_page > 0 ? $per_page : 20;
 	}
 
 	/**
@@ -220,21 +176,28 @@ class ResultsPage {
 	 *
 	 * @since 1.0.3
 	 * @since 1.0.9 Switched to streaming generator for memory efficiency.
+	 * @since 1.2.0 Exports the filters showing on screen instead of the whole table.
 	 * @return void
 	 */
 	public function handle_export(): void {
 		$nonce = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : '';
 
 		if ( ! wp_verify_nonce( $nonce, 'yoko_lc_export' ) ) {
-			wp_die( esc_html__( 'Security check failed.', 'yoko-link-checker' ) );
+			wp_die( esc_html__( 'Security check failed.', 'yoko-link-checker' ), '', array( 'response' => 403 ) );
 		}
 
 		if ( ! current_user_can( 'yoko_lc_view_results' ) && ! current_user_can( 'manage_options' ) ) {
-			wp_die( esc_html__( 'Permission denied.', 'yoko-link-checker' ) );
+			wp_die( esc_html__( 'Permission denied.', 'yoko-link-checker' ), '', array( 'response' => 403 ) );
 		}
 
-		// Set headers for CSV download.
-		$filename = 'yoko-link-checker-export-' . gmdate( 'Y-m-d-His' ) . '.csv';
+		// Same filters the Export button was clicked under -- the old export
+		// dumped every row of every status and still called the column "Broken URL".
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Nonce verified above.
+		$query = LinkQuery::from_request( wp_unslash( $_GET ) );
+
+		// Name the file after what is in it, so it is still identifiable after download.
+		$scope    = $query->ignored_only ? 'ignored' : ( $query->status ?? 'all' );
+		$filename = 'yoko-link-checker-' . $scope . '-' . gmdate( 'Y-m-d-His' ) . '.csv';
 		header( 'Content-Type: text/csv; charset=utf-8' );
 		header( 'Content-Disposition: attachment; filename="' . $filename . '"' );
 		header( 'Pragma: no-cache' );
@@ -257,7 +220,7 @@ class ResultsPage {
 		fputcsv(
 			$output,
 			array(
-				__( 'Broken URL', 'yoko-link-checker' ),
+				__( 'URL', 'yoko-link-checker' ),
 				__( 'Status', 'yoko-link-checker' ),
 				__( 'HTTP Code', 'yoko-link-checker' ),
 				__( 'Error Details', 'yoko-link-checker' ),
@@ -271,7 +234,7 @@ class ResultsPage {
 
 		// Stream data rows from the generator -- constant memory regardless of dataset size.
 		$row_count = 0;
-		foreach ( $this->link_repository->stream_for_export() as $link ) {
+		foreach ( $this->link_repository->stream_for_export( $query ) as $link ) {
 			fputcsv(
 				$output,
 				array(
@@ -279,9 +242,9 @@ class ResultsPage {
 					$link->status ?? '',
 					$link->http_code ?? '',
 					$this->sanitize_csv_value( $link->error_message ?? '' ),
-					$link->source_url ?? '',
+					$this->sanitize_csv_value( $link->source_url ?? '' ),
 					$this->sanitize_csv_value( $link->post_title ?? '' ),
-					$link->post_type ?? '',
+					$this->sanitize_csv_value( $link->post_type ?? '' ),
 					$this->sanitize_csv_value( $link->link_text ?? '' ),
 					$link->last_checked ?? '',
 				)

@@ -16,8 +16,11 @@ defined( 'ABSPATH' ) || exit;
 
 use YokoLinkChecker\Scanner\ScanOrchestrator;
 use YokoLinkChecker\Scanner\BatchProcessor;
-use YokoLinkChecker\Repository\UrlRepository;
+use YokoLinkChecker\Model\Url;
+use YokoLinkChecker\Repository\LinkQuery;
 use YokoLinkChecker\Repository\LinkRepository;
+use YokoLinkChecker\Repository\LinkStats;
+use YokoLinkChecker\Repository\UrlRepository;
 use YokoLinkChecker\Util\Logger;
 
 /**
@@ -56,24 +59,35 @@ class AjaxHandler {
 	private LinkRepository $link_repository;
 
 	/**
+	 * Link statistics service.
+	 *
+	 * @var LinkStats
+	 */
+	private LinkStats $link_stats;
+
+	/**
 	 * Constructor.
 	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Takes the stats service.
 	 * @param ScanOrchestrator $scan_orchestrator Scan orchestrator.
 	 * @param BatchProcessor   $batch_processor   Batch processor.
 	 * @param UrlRepository    $url_repository    URL repository.
 	 * @param LinkRepository   $link_repository   Link repository.
+	 * @param LinkStats        $link_stats        Link statistics service.
 	 */
 	public function __construct(
 		ScanOrchestrator $scan_orchestrator,
 		BatchProcessor $batch_processor,
 		UrlRepository $url_repository,
-		LinkRepository $link_repository
+		LinkRepository $link_repository,
+		LinkStats $link_stats
 	) {
 		$this->scan_orchestrator = $scan_orchestrator;
 		$this->batch_processor   = $batch_processor;
 		$this->url_repository    = $url_repository;
 		$this->link_repository   = $link_repository;
+		$this->link_stats        = $link_stats;
 	}
 
 	/**
@@ -378,21 +392,29 @@ class AjaxHandler {
 	/**
 	 * Get stats.
 	 *
+	 * Reads from LinkStats like every other surface, and reports both units --
+	 * this endpoint used to be a fifth independent counter with its own shape.
+	 *
 	 * @since 1.0.0
+	 * @since 1.2.0 Backed by LinkStats; response now carries both units.
 	 * @return void
 	 */
 	public function get_stats(): void {
 		$this->verify_request( 'yoko_lc_view_results' );
 
-		$status_counts = $this->url_repository->get_status_counts();
-		$stats         = array(
-			'total'    => array_sum( $status_counts ),
-			'broken'   => $status_counts['broken'] ?? 0,
-			'warning'  => $status_counts['warning'] ?? 0,
-			'redirect' => $status_counts['redirect'] ?? 0,
-			'valid'    => $status_counts['valid'] ?? 0,
-			'pending'  => $status_counts['pending'] ?? 0,
+		$counts = $this->link_stats->status_counts( new LinkQuery() );
+		$stats  = array(
+			'total_urls'  => $counts->total_urls(),
+			'total_links' => $counts->total_links(),
+			'by_status'   => array(),
 		);
+
+		foreach ( Url::STATUSES as $status ) {
+			$stats['by_status'][ $status ] = array(
+				'urls'  => $counts->urls( $status ),
+				'links' => $counts->links( $status ),
+			);
+		}
 
 		wp_send_json_success( $stats );
 	}
