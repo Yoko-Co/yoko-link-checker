@@ -68,6 +68,11 @@ requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
 - Link rows are pruned when their source post is permanently deleted
   (`before_delete_post`) and when links are removed from a post's content
   (during rescan), so occurrence counts stop drifting above URL counts.
+- **Scheduled events are now always cleared on uninstall**, even when scan data is
+  kept. The routine previously returned early in that case, leaving cron events
+  firing forever with no handler once the plugin was deleted.
+- Uninstall removes capabilities only from `administrator`, the role `Activator`
+  grants them to; it also tried to remove them from `editor`, which never had them.
 
 ### Security
 - **Redirects are validated at every hop.** The SSRF check previously ran once
@@ -107,23 +112,34 @@ requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
   sanitized, so arbitrary slugs can no longer be stored.
 
 ### Added
+- **WP-CLI commands**: `wp yoko-lc counts`, `wp yoko-lc verify`, `wp yoko-lc prune`
+  and `wp yoko-lc export`. `verify` asserts the counts are internally consistent and
+  exits non-zero when they are not — it is the acceptance test for this release.
 - **An uninstall data-retention setting.** `uninstall.php` has always read
   `yoko_lc_remove_data_on_uninstall` and defaulted to deleting everything, but
   nothing ever wrote it — there was no way to opt out. The Settings tab now has
   the checkbox.
-
-### Fixed (uninstall)
-- **Scheduled events are now always cleared on uninstall**, even when scan data
-  is kept. Previously the whole routine returned early, leaving cron events
-  firing forever with no handler once the plugin was gone.
-- Capabilities are removed only from `administrator`, the role `Activator` grants
-  them to. Uninstall also tried to remove them from `editor`, which never had them.
-
-### Added
-- **WP-CLI commands**: `wp yoko-lc counts`, `wp yoko-lc verify`, `wp yoko-lc prune`
-  and `wp yoko-lc export`. `verify` asserts the counts are internally consistent and
-  exits non-zero when they are not — it is the acceptance test for this release.
 - Per-status counts on the Reports filter tabs, and a rows-per-page screen option.
+
+### Removed
+- **The `yoko_lc_internal_http_args` filter.** Internal URL checks ran through a
+  separate HTTP path with their own arguments and SSL verification disabled; they
+  now go through the same client as every other request, so there is one SSRF gate
+  rather than two. Use `yoko_lc_http_request_args` instead, plus
+  `yoko_lc_allow_private_urls` where a private address must be reachable.
+
+### Upgrade notes
+- **Anyone with a plugin page open across the upgrade will see one "Security check
+  failed"** on their next action, because the page holds nonces in the old format.
+  Reloading fixes it. Unavoidable when nonce actions change.
+- **The localized `ylcAdmin.nonce` value is now `ylcAdmin.nonces`, keyed by action.**
+  Nothing in the plugin relies on the old key, but bespoke integrations would.
+- **Bookmarks to the old admin URLs stop working.** The screen moved from
+  `admin.php?page=yoko-link-checker*` to `tools.php?page=yoko-link-checker&tab=…`.
+  The menu slug itself is unchanged, so stored data and capabilities are unaffected.
+- **Running a scan deletes stale and orphaned link rows** (and `wp yoko-lc prune`
+  does so explicitly). This is the intended fix for counts drifting upward, but it
+  is not undone by reverting the code — snapshot the database first if that matters.
 
 ## [1.1.1] - 2026-03-04
 

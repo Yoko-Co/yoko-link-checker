@@ -2,7 +2,7 @@
 
 A performant, extensible broken link checker for WordPress. Scans content for links, checks their validity, and reports issues.
 
-**Version:** 1.1.1 | **Requirements:** WordPress 6.0+ | PHP 8.0+
+**Version:** 1.2.0 | **Requirements:** WordPress 6.0+ (tested to 7.0) | PHP 8.0+
 
 ## Description
 
@@ -17,8 +17,11 @@ Yoko Link Checker helps you identify and fix broken links across your WordPress 
 - **HTTP Fallback**: Falls back to HTTP checks for custom routes and plugin pages
 - **Batch Processing**: Handles large sites efficiently with AJAX-driven batch processing
 - **Status Classification**: Categorizes link issues (broken, redirect, warning, timeout, blocked)
-- **Admin Dashboard**: Clean interface with real-time progress and stats
-- **Link Reports**: View all links with status filtering, search, and CSV export
+- **Admin Dashboard**: Lives under Tools, with real-time progress and stats
+- **Link Reports**: View all links with per-status counts, search, and filtered CSV export
+- **Counts You Can Reconcile**: Every figure reports unique URLs *and* link occurrences, so no two screens can appear to disagree
+- **WP-CLI**: `wp yoko-lc counts | verify | prune | export` for headless operation and CI checks
+- **SSRF Protection**: Validates every redirect hop before following it, so a link cannot point the checker at internal infrastructure
 - **Intelligent Classification**: Handles quirky sites (LinkedIn 999, Facebook 403, etc.)
 - **Extensible Architecture**: Filters and hooks for customization
 
@@ -64,14 +67,32 @@ Yoko Link Checker helps you identify and fix broken links across your WordPress 
 | **Redirect** | Link redirects to another URL |
 | **Blocked** | Access denied (401/403) |
 | **Timeout** | Request timed out |
+| **Error** | Connection failed (DNS, SSL, network) |
+| **Pending** | Discovered but not yet checked |
+
+Blocked, Timeout and Error are grouped as **Needs Review** on the dashboard. They
+are deliberately not counted as Broken: most blocked responses are bot protection
+rather than a dead link, and folding them in would inflate the one number people act on.
+
+### Two units, always labelled
+
+A single broken URL used in twelve posts is **1 URL** and **12 links**. Both matter —
+a URL is fixed once, but each occurrence is a place someone must edit — so every
+screen states both, for example *"12 broken URLs across 34 links"*. The dashboard
+leads with URLs; the Reports table counts occurrences, because those are the rows
+it paginates.
 
 ## Configuration
 
 The plugin provides several configuration options:
 
+Settings live under **Tools → Yoko Link Checker → Settings**:
+
 - **Post Types**: Select which post types to scan
-- **Check Timeout**: Set timeout for HTTP requests
-- **Batch Size**: Configure posts/URLs processed per batch
+- **Check Timeout**: Set timeout for HTTP requests (5–120 seconds)
+- **Automatic Scans**: Enable and schedule recurring scans
+- **On Uninstall**: Choose whether deleting the plugin also deletes your scan data
+- **Batch Size**: Configure posts/URLs processed per batch (via filters, below)
 
 ### Debug Logging
 
@@ -142,14 +163,75 @@ add_filter( 'yoko_lc_skip_url_check', fn($skip, $url) => str_contains($url, 'loc
 add_filter( 'yoko_lc_discovery_batch_size', fn() => 100 );
 add_filter( 'yoko_lc_checking_batch_size', fn() => 10 );
 
-// Customize internal HTTP check
-add_filter( 'yoko_lc_internal_http_args', fn($args, $url) => $args, 10, 2 );
+// Customize outbound HTTP request arguments (all checks, internal and external)
+add_filter( 'yoko_lc_http_request_args', fn($args) => $args );
+
+// Allow requests to private/reserved IPs. Disables SSRF protection for the URL —
+// intended for local development only.
+add_filter( 'yoko_lc_allow_private_urls', fn($allow, $url) => $allow, 10, 2 );
+
+// Override how a response is classified
+add_filter( 'yoko_lc_classify_status', fn($status, $code, $url) => $status, 10, 3 );
 
 // Hook into scan lifecycle
+add_action( 'yoko_lc_scan_started', fn($scan_id, $type) => null, 10, 2 );
 add_action( 'yoko_lc_scan_completed', fn($scan) => wp_mail(...) );
+add_action( 'yoko_lc_url_checked', fn($url, $result) => null, 10, 2 );
 ```
 
+> **Removed in 1.2.0:** `yoko_lc_internal_http_args`. Internal URL checks used to
+> run through a separate HTTP path with its own arguments and SSL verification
+> disabled; they now go through the same client as every other request, so there
+> is one SSRF gate rather than two. Use `yoko_lc_http_request_args` instead, and
+> `yoko_lc_allow_private_urls` if you need to reach a private address.
+
+## WP-CLI
+
+```bash
+# Every status, in both units
+wp yoko-lc counts
+
+# Assert the counts are internally consistent; exits non-zero if not
+wp yoko-lc verify
+
+# Delete link rows whose source post no longer exists
+wp yoko-lc prune --dry-run
+
+# Same export as the admin screen, same filters
+wp yoko-lc export --status=broken --file=broken.csv
+```
+
+`wp yoko-lc verify` is the acceptance check for a release: it confirms the
+per-status counts sum to the totals in both units, that every status is reachable,
+and that no orphaned link rows are inflating the numbers.
+
 ## Changelog
+
+### 1.2.0
+Monthly maintenance: admin screen relocated, counts reconciled, SSRF hardened.
+
+**Changed:**
+- Moved from a top-level menu to **Tools → Yoko Link Checker**, with Dashboard/Reports/Settings as tabs
+- Every count derives from one source and reports both units (unique URLs and link occurrences)
+- Admin UI is named "Yoko Link Checker" throughout
+
+**Fixed:**
+- "Last scan" was overstated by the site's UTC offset on any site not set to UTC
+- Searching the Reports table produced empty pages
+- The `error` status was uncountable and unreachable in the UI
+- CSV export ignored on-screen filters and blanked the source columns for pages and CPTs
+- Scan progress could not reach 100%; a just-started scan could be failed as stale
+
+**Security:**
+- Redirects are validated at every hop (see WordPress 7.0.3)
+- Per-action AJAX nonces; `clear_data` requires `manage_options`
+- Settings save uses Post/Redirect/Get
+
+**Added:**
+- WP-CLI commands, an uninstall data-retention setting, per-status counts on the Reports tabs
+
+**Removed:**
+- `yoko_lc_internal_http_args` filter — see Filters & Hooks above
 
 ### 1.1.1
 Resolves 17 findings from Round 4 code review.
