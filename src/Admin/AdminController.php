@@ -146,6 +146,7 @@ class AdminController {
 			// WP SEAM: load-{$hook} -- fires only for this screen, before render.
 			add_action( "load-{$hook}", array( $this, 'maybe_handle_export' ) );
 			add_action( "load-{$hook}", array( $this, 'maybe_handle_reports_actions' ) );
+			add_action( "load-{$hook}", array( $this, 'maybe_handle_settings_save' ) );
 		}
 	}
 
@@ -349,7 +350,9 @@ class AdminController {
 	private function get_js_data(): array {
 		return array(
 			'ajaxUrl' => admin_url( 'admin-ajax.php' ),
-			'nonce'   => wp_create_nonce( 'yoko_lc_admin' ),
+			// One nonce per endpoint, keyed by action. A single shared nonce meant
+			// anything that could read this object could call clear_data.
+			'nonces'  => AjaxHandler::nonces(),
 			'strings' => array(
 				'confirmStart'  => __( 'Start a new scan?', 'yoko-link-checker' ),
 				'confirmCancel' => __( 'Cancel the current scan?', 'yoko-link-checker' ),
@@ -385,11 +388,9 @@ class AdminController {
 			);
 		}
 
-		// Handle form submission.
-		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in handle_settings_save().
-		if ( isset( $_POST['yoko_lc_settings_nonce'] ) ) {
-			$this->handle_settings_save();
-		}
+		// The save itself runs on the load hook (see maybe_handle_settings_save)
+		// and redirects, so by the time we render there is only a result to show.
+		$this->queue_settings_notice();
 
 		$settings = $this->get_settings();
 
@@ -397,27 +398,88 @@ class AdminController {
 	}
 
 	/**
+	 * Save settings on the screen's load hook, then redirect.
+	 *
+	 * Post/Redirect/Get. The save used to run during render, which left the POST
+	 * in the browser's history: refreshing the page silently re-submitted the
+	 * form, and the "are you sure you want to resubmit" dialog was the only thing
+	 * standing between a stray refresh and a repeat write (including a cron
+	 * reschedule). Running before output means we can redirect instead.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	public function maybe_handle_settings_save(): void {
+		if ( 'settings' !== self::current_tab() ) {
+			return;
+		}
+
+		// phpcs:ignore WordPress.Security.NonceVerification.Missing -- Nonce verified in handle_settings_save().
+		if ( ! isset( $_POST['yoko_lc_settings_nonce'] ) ) {
+			return;
+		}
+
+		$result = $this->handle_settings_save();
+
+		wp_safe_redirect( self::page_url( 'settings', array( 'ylc_notice' => $result ) ) );
+		exit;
+	}
+
+	/**
+	 * Turn the redirect's result code back into an admin notice.
+	 *
+	 * Notices queued with add_settings_error() do not survive a redirect, so the
+	 * outcome travels in the URL and is translated back into one here.
+	 *
+	 * @since 1.2.0
+	 * @return void
+	 */
+	private function queue_settings_notice(): void {
+		// phpcs:ignore WordPress.Security.NonceVerification.Recommended -- Display-only, and allow-listed below.
+		$notice = isset( $_GET['ylc_notice'] ) ? sanitize_key( wp_unslash( $_GET['ylc_notice'] ) ) : '';
+
+		$notices = array(
+			'saved'      => array( __( 'Settings saved.', 'yoko-link-checker' ), 'success' ),
+			'nonce'      => array( __( 'Security check failed. Please try again.', 'yoko-link-checker' ), 'error' ),
+			'permission' => array( __( 'Permission denied.', 'yoko-link-checker' ), 'error' ),
+		);
+
+		if ( ! isset( $notices[ $notice ] ) ) {
+			return;
+		}
+
+		add_settings_error( 'yoko_lc_settings', "yoko_lc_{$notice}", $notices[ $notice ][0], $notices[ $notice ][1] );
+	}
+
+	/**
 	 * Handle settings save.
 	 *
 	 * @since 1.0.0
-	 * @return void
+	 * @since 1.2.0 Returns a result code instead of queueing a notice, so the
+	 *              caller can redirect (Post/Redirect/Get).
+	 * @return string One of 'saved', 'nonce', 'permission'.
 	 */
-	private function handle_settings_save(): void {
-		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+	private function handle_settings_save(): string {
+		// phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized -- wp_verify_nonce() hashes the value.
 		if ( ! wp_verify_nonce( wp_unslash( $_POST['yoko_lc_settings_nonce'] ?? '' ), 'yoko_lc_settings' ) ) {
-			add_settings_error( 'yoko_lc_settings', 'nonce_error', __( 'Security check failed.', 'yoko-link-checker' ) );
-			return;
+			return 'nonce';
 		}
 
 		if ( ! self::can_manage_settings() ) {
-			add_settings_error( 'yoko_lc_settings', 'permission_error', __( 'Permission denied.', 'yoko-link-checker' ) );
-			return;
+			return 'permission';
 		}
 
-		// Sanitize and save settings.
-		$post_types = isset( $_POST['yoko_lc_post_types'] ) && is_array( $_POST['yoko_lc_post_types'] )
+		// Only post types that actually exist and are scannable. Sanitizing alone
+		// let arbitrary slugs be stored, which then sat in the options table
+		// forever looking like a configuration the site no longer had.
+		$submitted  = isset( $_POST['yoko_lc_post_types'] ) && is_array( $_POST['yoko_lc_post_types'] )
 			? array_map( 'sanitize_key', wp_unslash( $_POST['yoko_lc_post_types'] ) )
-			: array( 'post', 'page' );
+			: array();
+		$post_types = array_values( array_filter( $submitted, 'post_type_exists' ) );
+
+		if ( empty( $post_types ) ) {
+			$post_types = array( 'post', 'page' );
+		}
 
 		$check_timeout = isset( $_POST['yoko_lc_check_timeout'] )
 			? absint( wp_unslash( $_POST['yoko_lc_check_timeout'] ) )
@@ -439,6 +501,10 @@ class AdminController {
 		update_option( 'yoko_lc_auto_scan_enabled', $auto_scan );
 		update_option( 'yoko_lc_auto_scan_frequency', $scan_frequency );
 
+		// uninstall.php reads this and defaults to destroying everything. Until
+		// now nothing wrote it, so there was no way to answer the question.
+		update_option( 'yoko_lc_remove_data_on_uninstall', isset( $_POST['yoko_lc_remove_data_on_uninstall'] ) );
+
 		// Sync cron schedule with saved auto-scan settings.
 		wp_clear_scheduled_hook( 'yoko_lc_auto_scan' );
 
@@ -446,7 +512,7 @@ class AdminController {
 			wp_schedule_event( time(), $scan_frequency, 'yoko_lc_auto_scan' );
 		}
 
-		add_settings_error( 'yoko_lc_settings', 'saved', __( 'Settings saved.', 'yoko-link-checker' ), 'success' );
+		return 'saved';
 	}
 
 	/**
@@ -461,6 +527,9 @@ class AdminController {
 			'check_timeout'       => get_option( 'yoko_lc_check_timeout', 30 ),
 			'auto_scan_enabled'   => get_option( 'yoko_lc_auto_scan_enabled', false ),
 			'auto_scan_frequency' => get_option( 'yoko_lc_auto_scan_frequency', 'weekly' ),
+			// Matches uninstall.php's own default, so the checkbox reflects what
+			// would actually happen if the plugin were deleted right now.
+			'remove_data'         => (bool) get_option( 'yoko_lc_remove_data_on_uninstall', true ),
 		);
 	}
 }

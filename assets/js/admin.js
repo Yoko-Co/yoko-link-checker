@@ -126,7 +126,7 @@
 			type: 'POST',
 			data: {
 				action: 'yoko_lc_get_scan_status',
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.get_scan_status
 			},
 			success: function(response) {
 				if (response && response.success && response.data) {
@@ -200,7 +200,7 @@
 			type: 'POST',
 			data: {
 				action: 'yoko_lc_start_scan',
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.start_scan
 			},
 			success: function(response) {
 				if (!response || !response.success) {
@@ -236,7 +236,7 @@
 			data: {
 				action: 'yoko_lc_pause_scan',
 				scan_id: scanId,
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.pause_scan
 			},
 			success: function(response) {
 				if (!response || !response.success) {
@@ -273,7 +273,7 @@
 			data: {
 				action: 'yoko_lc_resume_scan',
 				scan_id: scanId,
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.resume_scan
 			},
 			success: function(response) {
 				if (!response || !response.success) {
@@ -313,7 +313,7 @@
 			data: {
 				action: 'yoko_lc_cancel_scan',
 				scan_id: scanId,
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.cancel_scan
 			},
 			success: function(response) {
 				if (!response || !response.success) {
@@ -351,7 +351,7 @@
 			type: 'POST',
 			data: {
 				action: 'yoko_lc_clear_data',
-				nonce: ylcAdmin.nonce
+				nonce: ylcAdmin.nonces.clear_data
 			},
 			success: function(response) {
 				if (!response || !response.success) {

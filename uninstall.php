@@ -2,27 +2,75 @@
 /**
  * Uninstall handler.
  *
- * Runs when the plugin is uninstalled.
- * Removes all plugin data including database tables and options.
+ * Runs when the plugin is deleted (not on deactivation).
+ *
+ * Two things happen here, and only one of them is optional. Scheduled events and
+ * capabilities are ALWAYS removed: a cron event left pointing at a deleted
+ * plugin fires forever with nothing to handle it, and a capability nobody can
+ * use is just confusing. Scan data is removed only if the site asked for that on
+ * the Settings tab, so a plugin removed for troubleshooting can be reinstalled
+ * with its history intact.
  *
  * @package YokoLinkChecker
  * @since   1.0.0
  */
 
-// Exit if not uninstalling.
+// Exit if not uninstalling. WordPress only defines this from delete_plugins(),
+// which already requires the delete_plugins capability.
 if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 	exit;
 }
 
 // Wrap in closure to avoid global namespace pollution.
 ( function () {
-	$remove_data = get_option( 'yoko_lc_remove_data_on_uninstall', true );
+	global $wpdb;
 
-	if ( ! $remove_data ) {
-		return;
+	/**
+	 * Always: clear scheduled hooks.
+	 *
+	 * These must go whatever the data setting says. WP-Cron keeps firing events
+	 * whose handler no longer exists, which shows up as recurring cron noise on
+	 * a site that no longer has the plugin.
+	 */
+	wp_clear_scheduled_hook( 'yoko_lc_process_scan_batch' );
+	wp_clear_scheduled_hook( 'yoko_lc_auto_scan' );
+
+	/**
+	 * Always: remove capabilities.
+	 *
+	 * Only from the role Activator::set_capabilities() grants them to. Removing
+	 * them from roles we never granted would be reaching into configuration a
+	 * site owner made deliberately.
+	 */
+	$capabilities = array(
+		'yoko_lc_manage_scans',
+		'yoko_lc_view_results',
+		'yoko_lc_manage_settings',
+	);
+
+	$admin_role = get_role( 'administrator' );
+
+	if ( $admin_role ) {
+		foreach ( $capabilities as $cap ) {
+			$admin_role->remove_cap( $cap );
+		}
 	}
 
-	global $wpdb;
+	/**
+	 * Always: clear the scan lock, which is meaningless without the plugin.
+	 */
+	delete_transient( 'yoko_lc_scan_lock' );
+
+	/**
+	 * Optional: destroy scan data.
+	 *
+	 * Defaults to true, matching the checkbox default on the Settings tab. The
+	 * option itself is deleted below only on this branch -- if the site chose to
+	 * keep its data, the choice is kept with it so a reinstall remembers it.
+	 */
+	if ( ! get_option( 'yoko_lc_remove_data_on_uninstall', true ) ) {
+		return;
+	}
 
 	/**
 	 * Remove custom database tables.
@@ -65,36 +113,8 @@ if ( ! defined( 'WP_UNINSTALL_PLUGIN' ) ) {
 	);
 
 	/**
-	 * Remove capabilities from roles.
+	 * Clear remaining transients.
 	 */
-	$capabilities = array(
-		'yoko_lc_manage_scans',
-		'yoko_lc_view_results',
-		'yoko_lc_manage_settings',
-	);
-
-	$role_names = array( 'administrator', 'editor' );
-
-	foreach ( $role_names as $role_name ) {
-		$wp_role = get_role( $role_name );
-		if ( $wp_role ) {
-			foreach ( $capabilities as $cap ) {
-				$wp_role->remove_cap( $cap );
-			}
-		}
-	}
-
-	/**
-	 * Clear scheduled hooks.
-	 */
-	wp_clear_scheduled_hook( 'yoko_lc_process_scan_batch' );
-	wp_clear_scheduled_hook( 'yoko_lc_auto_scan' );
-
-	/**
-	 * Clear transients.
-	 */
-	delete_transient( 'yoko_lc_scan_lock' );
-
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery,WordPress.DB.DirectDatabaseQuery.NoCaching
 	$wpdb->query(
 		$wpdb->prepare(

@@ -90,6 +90,34 @@ requests against SSRF in light of the WordPress 7.0.1–7.0.4 releases.
   verification disabled; it goes through `HttpClient` with a scoped exemption for
   the site's own host.
 - The User-Agent advertised `https://example.com`; it now identifies the real site.
+- **Every AJAX endpoint has its own nonce.** All ten shared a single
+  `yoko_lc_admin` nonce, so a token leaked from any plugin page — via a referrer,
+  or anything able to read the localized script object — authorised `clear_data`,
+  which truncates all three tables, exactly as readily as a status poll.
+- **`clear_data` now requires `manage_options`** rather than the scan-management
+  capability. Being able to run a scan is not the same as being able to destroy
+  its history.
+- **Status polling can no longer be used to spawn cron on demand.** The endpoint
+  needs only view capability but called `spawn_cron()` on every poll; it is now
+  rate-limited to once every 30 seconds.
+- **Settings saving uses Post/Redirect/Get.** The save ran during page render, so
+  the POST stayed in browser history and a refresh silently re-submitted it —
+  including the cron reschedule.
+- **Saved post types are validated against registered post types**, not just
+  sanitized, so arbitrary slugs can no longer be stored.
+
+### Added
+- **An uninstall data-retention setting.** `uninstall.php` has always read
+  `yoko_lc_remove_data_on_uninstall` and defaulted to deleting everything, but
+  nothing ever wrote it — there was no way to opt out. The Settings tab now has
+  the checkbox.
+
+### Fixed (uninstall)
+- **Scheduled events are now always cleared on uninstall**, even when scan data
+  is kept. Previously the whole routine returned early, leaving cron events
+  firing forever with no handler once the plugin was gone.
+- Capabilities are removed only from `administrator`, the role `Activator` grants
+  them to. Uninstall also tried to remove them from `editor`, which never had them.
 
 ### Added
 - **WP-CLI commands**: `wp yoko-lc counts`, `wp yoko-lc verify`, `wp yoko-lc prune`
