@@ -417,27 +417,15 @@ final class UrlChecker {
 
 		$wp_args = $this->http_client->get_request_args();
 
-		$headers = array(
-			'User-Agent'      => $wp_args['user-agent'] ?? '',
-			'Accept'          => $wp_args['headers']['Accept'] ?? 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-			'Accept-Language' => $wp_args['headers']['Accept-Language'] ?? 'en-US,en;q=0.5',
-			'Connection'      => 'close',
-		);
-
 		// Redirects are deliberately NOT followed here. The Requests library would
 		// follow them without re-running the SSRF gate, so an external URL that
 		// redirects to a private or link-local address would be fetched. Any 3xx
-		// seen below is re-checked through HttpClient, which validates every hop.
-		$options = array(
-			'timeout'          => $wp_args['timeout'] ?? 8,
-			'connect_timeout'  => $wp_args['connect_timeout'] ?? 5,
-			'follow_redirects' => false,
-			'verify'           => $wp_args['sslverify'] ?? true,
-		);
+		// seen below is queued for the next round, which validates it again.
+		$options = array( 'follow_redirects' => false );
 
 		$requests     = array();
 		$ssrf_blocked = array();
-		$start_time   = microtime( true );
+		$preempted    = array();
 		$urls         = array_keys( $url_map );
 
 		Logger::debug(
@@ -459,29 +447,41 @@ final class UrlChecker {
 				continue;
 			}
 
-			$requests[ $url ] = array(
-				'url'     => $url,
-				'headers' => $headers,
-				'type'    => $method,
-				'options' => $options,
-			);
+			// The same controls wp_remote_request() applies: pre_http_request,
+			// WP_HTTP_BLOCK_EXTERNAL and friends. A URL they stop never joins
+			// the batch.
+			$preflight = $this->http_client->preflight( $method, $url );
+
+			if ( null !== $preflight['response'] ) {
+				$preempted[ $url ] = $preflight['response'];
+				continue;
+			}
+
+			$requests[ $url ] = $this->build_parallel_request( $url, $method, $preflight['args'] );
 		}
 
-		try {
-			/**
-			 * Results from parallel HTTP requests.
-			 *
-			 * @var array<string, \WpOrg\Requests\Response|\WpOrg\Requests\Exception> $responses
-			 */
-			$responses = $requests_class::request_multiple( $requests, $options );
-		} catch ( \Throwable $e ) {
-			Logger::debug( 'Parallel request_multiple failed', array( 'error' => $e->getMessage() ) );
-			return false;
+		$responses  = array();
+		$start_time = microtime( true );
+
+		// Skip the call entirely when nothing is left to fetch, so a site that
+		// blocks every request sees no network activity at all.
+		if ( ! empty( $requests ) ) {
+			try {
+				/**
+				 * Results from parallel HTTP requests.
+				 *
+				 * @var array<string, \WpOrg\Requests\Response|\WpOrg\Requests\Exception> $responses
+				 */
+				$responses = $requests_class::request_multiple( $requests, $options );
+			} catch ( \Throwable $e ) {
+				Logger::debug( 'Parallel request_multiple failed', array( 'error' => $e->getMessage() ) );
+				return false;
+			}
 		}
 
 		$results      = array();
 		$elapsed_time = (int) round( ( microtime( true ) - $start_time ) * 1000 );
-		$time_per_url = count( $urls ) > 0 ? (int) round( $elapsed_time / count( $urls ) ) : 0;
+		$time_per_url = count( $requests ) > 0 ? (int) round( $elapsed_time / count( $requests ) ) : 0;
 
 		// Add SSRF-blocked URLs to results.
 		foreach ( $ssrf_blocked as $url => $ssrf_error ) {
@@ -518,45 +518,64 @@ final class UrlChecker {
 				continue;
 			}
 
-			if ( ! isset( $responses[ $url ] ) ) {
-				$results[ $origin ] = CheckResult::error(
-					$origin,
-					'broken',
-					'parallel_request_failed',
-					__( 'No response received from parallel request.', 'yoko-link-checker' ),
-					null,
-					$time_per_url
-				);
-				continue;
+			if ( isset( $preempted[ $url ] ) ) {
+				$response = $preempted[ $url ];
+
+				// Same handling the sequential path gives a WP_Error from
+				// wp_remote_request(), so both paths report the same status.
+				if ( is_wp_error( $response ) ) {
+					$results[ $origin ] = $this->process_response( $origin, $response, 0 );
+					continue;
+				}
+
+				$http_code        = (int) $this->http_client->get_response_code( $response );
+				$response_headers = $this->http_client->get_headers( $response );
+				$response_url     = '';
+				$response_time    = 0;
+			} else {
+				if ( ! isset( $responses[ $url ] ) ) {
+					$results[ $origin ] = CheckResult::error(
+						$origin,
+						'broken',
+						'parallel_request_failed',
+						__( 'No response received from parallel request.', 'yoko-link-checker' ),
+						null,
+						$time_per_url
+					);
+					continue;
+				}
+
+				$response = $responses[ $url ];
+
+				if ( $response instanceof \Exception ) {
+					$error_message = $response->getMessage();
+					$error_type    = HttpClient::classify_error( $error_message );
+
+					$status = $this->classifier->classify( null, $error_type, $error_message, $origin );
+
+					$results[ $origin ] = CheckResult::error(
+						$origin,
+						$status,
+						$error_type,
+						$error_message,
+						null,
+						$time_per_url
+					);
+					continue;
+				}
+
+				$http_code        = (int) $response->status_code;
+				$response_headers = $this->get_requests_headers( $response );
+				$response_url     = (string) $response->url;
+				$response_time    = $time_per_url;
 			}
-
-			$response = $responses[ $url ];
-
-			if ( $response instanceof \Exception ) {
-				$error_message = $response->getMessage();
-				$error_type    = HttpClient::classify_error( $error_message );
-
-				$status = $this->classifier->classify( null, $error_type, $error_message, $origin );
-
-				$results[ $origin ] = CheckResult::error(
-					$origin,
-					$status,
-					$error_type,
-					$error_message,
-					null,
-					$time_per_url
-				);
-				continue;
-			}
-
-			$http_code = (int) $response->status_code;
 
 			// Queue the redirect target for the next parallel round rather than
 			// re-checking this URL on its own. The Location header is already in
 			// hand, so following it costs no extra request -- and the whole batch
 			// advances together instead of dropping into serial requests.
 			if ( $http_code >= 300 && $http_code < 400 ) {
-				$location = $this->extract_location( $response, $url );
+				$location = $this->extract_location( $response_headers, $url );
 
 				if ( null !== $location && $hop < $max_redirects ) {
 					$next_round[ $location ][] = $origin;
@@ -571,7 +590,7 @@ final class UrlChecker {
 					$http_code,
 					$location,
 					$hop,
-					$time_per_url,
+					$response_time,
 					null,
 					null,
 					array()
@@ -582,18 +601,11 @@ final class UrlChecker {
 			$final_url = $url;
 			$redirects = $hop;
 
-			if ( ! empty( $response->url ) && $response->url !== $url ) {
-				$final_url = $response->url;
+			if ( '' !== $response_url && $response_url !== $url ) {
+				$final_url = $response_url;
 			}
 
 			$status = $this->classifier->classify( $http_code, null, null, $origin, $final_url );
-
-			$response_headers = array();
-			if ( is_array( $response->headers ) ) {
-				$response_headers = $response->headers;
-			} elseif ( is_object( $response->headers ) && method_exists( $response->headers, 'getAll' ) ) {
-				$response_headers = $response->headers->getAll();
-			}
 
 			$results[ $origin ] = new CheckResult(
 				$origin,
@@ -601,7 +613,7 @@ final class UrlChecker {
 				$http_code,
 				$final_url !== $origin ? $final_url : null,
 				$redirects,
-				$time_per_url,
+				$response_time,
 				null,
 				null,
 				$response_headers
@@ -649,22 +661,74 @@ final class UrlChecker {
 	}
 
 	/**
-	 * Get the absolute redirect target from a parallel response.
+	 * Build one request_multiple() entry from the args HttpClient::preflight() settled on.
 	 *
-	 * @since 1.2.0
-	 * @param object $response Requests response object.
-	 * @param string $base_url URL the response came from.
-	 * @return string|null Absolute target, or null when there isn't a usable one.
+	 * Uses the args after http_request_args has run, so a site filter that
+	 * changes the timeout, headers or SSL verification gets the same effect
+	 * here as it would through wp_remote_request(). The option mapping follows
+	 * WP_Http::request().
+	 *
+	 * @since 1.2.1
+	 * @param string               $url    URL to fetch.
+	 * @param string               $method HTTP method.
+	 * @param array<string, mixed> $args   Parsed args from HttpClient::preflight().
+	 * @return array<string, mixed>
 	 */
-	private function extract_location( $response, string $base_url ): ?string {
-		$headers = array();
+	private function build_parallel_request( string $url, string $method, array $args ): array {
+		$options = array(
+			'timeout'          => $args['timeout'],
+			'useragent'        => $args['user-agent'],
+			'follow_redirects' => false,
+			'verify'           => $args['sslcertificates'],
+		);
 
-		if ( is_array( $response->headers ) ) {
-			$headers = $response->headers;
-		} elseif ( is_object( $response->headers ) && method_exists( $response->headers, 'getAll' ) ) {
-			$headers = $response->headers->getAll();
+		// Not a core arg; HttpClient adds it, and the curl transport honours it.
+		if ( isset( $args['connect_timeout'] ) ) {
+			$options['connect_timeout'] = $args['connect_timeout'];
 		}
 
+		if ( ! $args['sslverify'] ) {
+			$options['verify']     = false;
+			$options['verifyname'] = false;
+		}
+
+		return array(
+			'url'     => $url,
+			'headers' => is_array( $args['headers'] ) ? $args['headers'] : array(),
+			'type'    => $method,
+			'options' => $options,
+		);
+	}
+
+	/**
+	 * Get the headers of a Requests response as a plain array.
+	 *
+	 * @since 1.2.1
+	 * @param object $response Requests response object.
+	 * @return array<string, mixed>
+	 */
+	private function get_requests_headers( $response ): array {
+		if ( is_array( $response->headers ) ) {
+			return $response->headers;
+		}
+
+		if ( is_object( $response->headers ) && method_exists( $response->headers, 'getAll' ) ) {
+			return $response->headers->getAll();
+		}
+
+		return array();
+	}
+
+	/**
+	 * Get the absolute redirect target from a response's headers.
+	 *
+	 * @since 1.2.0
+	 * @since 1.2.1 Takes the headers rather than the response object.
+	 * @param array<string, mixed> $headers  Response headers.
+	 * @param string               $base_url URL the response came from.
+	 * @return string|null Absolute target, or null when there isn't a usable one.
+	 */
+	private function extract_location( array $headers, string $base_url ): ?string {
 		$location = $headers['location'] ?? $headers['Location'] ?? '';
 
 		if ( is_array( $location ) ) {

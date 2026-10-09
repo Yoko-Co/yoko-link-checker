@@ -149,8 +149,15 @@ final class StatusClassifier {
 			case 'connection_error':
 				return Url::STATUS_ERROR;
 
+			// http_request_not_executed is core's code for WP_HTTP_BLOCK_EXTERNAL.
+			// Matched on the code because the message is translated, so the
+			// "blocked" hint below would miss it on non-English sites.
+			// ylc_request_preempted is HttpClient's code for a pre_http_request
+			// filter that stopped a request without returning a response.
 			case 'connection_refused':
 			case 'blocked':
+			case 'http_request_not_executed':
+			case 'ylc_request_preempted':
 				return Url::STATUS_BLOCKED;
 
 			default:

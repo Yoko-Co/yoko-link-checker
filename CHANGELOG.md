@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Parallel link checks now honour WordPress's outbound-request controls.** The
+  parallel round called the Requests library directly, so `pre_http_request` and
+  `WP_HTTP_BLOCK_EXTERNAL` / `WP_ACCESSIBLE_HOSTS` never ran for it. Staging copies
+  and harness clones that block outbound HTTP still sent real requests to every
+  external host, and the same URL got a different status depending on which path
+  checked it. A new `HttpClient::preflight()` runs each URL through the same steps
+  `WP_Http::request()` takes before it sends anything: core's defaults,
+  `http_request_args`, `pre_http_request`, URL validation and `block_request()`.
+  A short-circuited error or response is used as the result. URLs that pass are
+  sent with the args those filters produced, and the batch is skipped entirely when
+  nothing is left to fetch. ([#3](https://github.com/Yoko-Co/yoko-link-checker/issues/3))
+- A `pre_http_request` filter that returns something other than an array or
+  `WP_Error` (e.g. `true`) is now reported as blocked on both paths. Before, the
+  sequential path crashed on it and the parallel path ignored it.
+- Core's `http_request_not_executed` error is classified as **blocked** by its code,
+  not by matching the English word "blocked" in its translated message.
+- Parallel response times no longer include time spent in SSRF checks and
+  request filters.
+
+### Added
+- PHPUnit test suite (`composer test`), run in CI alongside PHPCS.
+
 ## [1.2.0] - 2026-08-12
 
 Monthly maintenance: relocates the admin screen, reconciles the broken-link
