@@ -162,10 +162,6 @@ final class HttpClient {
 		$redirect_count = 0;
 		$response       = null;
 
-		$args                = $this->get_request_args();
-		$args['redirection'] = 0;
-		$args['method']      = $method;
-
 		do {
 			$ssrf_error = $this->check_ssrf( $current_url );
 
@@ -176,11 +172,9 @@ final class HttpClient {
 				);
 			}
 
-			// Add core's validator on top of ours wherever it cannot change the
-			// verdict for a legitimate link. See get_request_args().
-			$args['reject_unsafe_urls'] = $this->has_standard_port( $current_url );
-
-			$response = wp_remote_request( $current_url, $args );
+			$response = self::usable_response(
+				wp_remote_request( $current_url, $this->build_request_args( $method, $current_url ) )
+			);
 
 			if ( is_wp_error( $response ) ) {
 				break;
@@ -235,6 +229,162 @@ final class HttpClient {
 		$port = wp_parse_url( $url, PHP_URL_PORT );
 
 		return null === $port || false === $port || in_array( (int) $port, array( 80, 443, 8080 ), true );
+	}
+
+	/**
+	 * The arguments this client hands wp_remote_request() for one hop.
+	 *
+	 * The single source for both the sequential path and the parallel round's
+	 * preflight(), so the two cannot drift apart.
+	 *
+	 * @since 1.2.1
+	 * @param string $method HTTP method, HEAD or GET.
+	 * @param string $url    URL about to be requested.
+	 * @return array<string, mixed>
+	 */
+	public function build_request_args( string $method, string $url ): array {
+		$args                = $this->get_request_args();
+		$args['method']      = $method;
+		$args['redirection'] = 0;
+
+		// Add core's validator on top of ours wherever it cannot change the
+		// verdict for a legitimate link. See get_request_args().
+		$args['reject_unsafe_urls'] = $this->has_standard_port( $url );
+
+		return $args;
+	}
+
+	/**
+	 * Run WordPress's pre-transport request controls without sending anything.
+	 *
+	 * The parallel round hands its batch to the Requests library directly, so
+	 * nothing in WP_Http runs for it. Without this, a staging copy or harness
+	 * clone that stubs pre_http_request or sets WP_HTTP_BLOCK_EXTERNAL would
+	 * still send a real request to every external host in its content, while
+	 * the same URL on the sequential path came back blocked.
+	 *
+	 * Mirrors WP_Http::request() up to the point it calls the transport:
+	 * defaults, http_request_args, pre_http_request, URL validation, then
+	 * block_request(). Each step uses core's own hooks and error codes, so a
+	 * site's filters see the same args and produce the same result on either
+	 * path. Re-check against class-wp-http.php when core's request() changes.
+	 *
+	 * @since 1.2.1
+	 * @param string $method HTTP method, HEAD or GET.
+	 * @param string $url    URL about to be requested.
+	 * @return array{args: array<string, mixed>|null, response: array|WP_Error|null}
+	 *         Either the args core would send (response null, go ahead and fetch)
+	 *         or the response/error to use instead (args null, do not fetch).
+	 */
+	public function preflight( string $method, string $url ): array {
+		$parsed_args = $this->parse_core_args( $this->build_request_args( $method, $url ), $url );
+
+		/** This filter is documented in wp-includes/class-wp-http.php */
+		$pre = apply_filters( 'pre_http_request', false, $parsed_args, $url ); // phpcs:ignore WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hook.
+
+		if ( false !== $pre ) {
+			return array(
+				'args'     => null,
+				'response' => self::usable_response( $pre ),
+			);
+		}
+
+		$checked = $url;
+
+		if ( function_exists( 'wp_kses_bad_protocol' ) ) {
+			if ( $parsed_args['reject_unsafe_urls'] ) {
+				$checked = (string) wp_http_validate_url( $checked );
+			}
+			if ( '' !== $checked ) {
+				$checked = wp_kses_bad_protocol( $checked, array( 'http', 'https', 'ssl' ) );
+			}
+		}
+
+		if ( '' === $checked || '' === (string) wp_parse_url( $checked, PHP_URL_SCHEME ) ) {
+			return array(
+				'args'     => null,
+				'response' => new WP_Error( 'http_request_failed', __( 'A valid URL was not provided.', 'yoko-link-checker' ) ),
+			);
+		}
+
+		if ( ( new \WP_Http() )->block_request( $checked ) ) {
+			return array(
+				'args'     => null,
+				'response' => new WP_Error(
+					'http_request_not_executed',
+					/* translators: %s: URL to which the HTTP request was blocked. */
+					sprintf( __( 'User has blocked requests through HTTP to the URL: %s.', 'yoko-link-checker' ), $checked )
+				),
+			);
+		}
+
+		return array(
+			'args'     => $parsed_args,
+			'response' => null,
+		);
+	}
+
+	/**
+	 * Merge core's request defaults and apply http_request_args, as WP_Http::request() does.
+	 *
+	 * @since 1.2.1
+	 * @param array<string, mixed> $args Args from build_request_args().
+	 * @param string               $url  URL about to be requested.
+	 * @return array<string, mixed>
+	 */
+	private function parse_core_args( array $args, string $url ): array {
+		// phpcs:disable WordPress.NamingConventions.PrefixAllGlobals.NonPrefixedHooknameFound -- Core hooks, documented in wp-includes/class-wp-http.php.
+		$defaults = array(
+			'method'              => 'GET',
+			'timeout'             => apply_filters( 'http_request_timeout', 5, $url ),
+			'redirection'         => apply_filters( 'http_request_redirection_count', 5, $url ),
+			'httpversion'         => apply_filters( 'http_request_version', '1.0', $url ),
+			'user-agent'          => apply_filters( 'http_headers_useragent', 'WordPress/' . get_bloginfo( 'version' ) . '; ' . get_bloginfo( 'url' ), $url ),
+			'reject_unsafe_urls'  => apply_filters( 'http_request_reject_unsafe_urls', false, $url ),
+			'blocking'            => true,
+			'headers'             => array(),
+			'cookies'             => array(),
+			'body'                => null,
+			'compress'            => false,
+			'decompress'          => true,
+			'sslverify'           => true,
+			'sslcertificates'     => ABSPATH . WPINC . '/certificates/ca-bundle.crt',
+			'stream'              => false,
+			'filename'            => null,
+			'limit_response_size' => null,
+		);
+
+		$parsed_args = apply_filters( 'http_request_args', wp_parse_args( $args, $defaults ), $url );
+		// phpcs:enable
+
+		if ( ! isset( $parsed_args['_redirection'] ) ) {
+			$parsed_args['_redirection'] = $parsed_args['redirection'];
+		}
+
+		return $parsed_args;
+	}
+
+	/**
+	 * Turn an off-contract pre_http_request return into an error.
+	 *
+	 * Core passes any non-false pre_http_request value straight back, but only
+	 * an array or WP_Error is supported. Anything else (true, null, a string)
+	 * means a filter stopped the request without saying what happened, so it
+	 * is reported as blocked rather than crashing the checker or fetching.
+	 *
+	 * @since 1.2.1
+	 * @param mixed $response Return value of wp_remote_request() or pre_http_request.
+	 * @return array|WP_Error
+	 */
+	private static function usable_response( $response ) {
+		if ( is_array( $response ) || is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		return new WP_Error(
+			'ylc_request_preempted',
+			__( 'A pre_http_request filter blocked the request without returning a response.', 'yoko-link-checker' )
+		);
 	}
 
 	/**

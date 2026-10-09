@@ -49,6 +49,8 @@ jobs:
             --exclude "*.log" \
             --exclude "composer.json" \
             --exclude "phpcs.xml.dist" \
+            --exclude "phpunit.xml.dist" \
+            --exclude "tests" \
             ./ build/yoko-link-checker/
 
           cd build
